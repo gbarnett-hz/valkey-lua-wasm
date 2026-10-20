@@ -10,5 +10,8 @@ cd java && mvn test  # loads lua.wasm in Chicory and runs scripts against each l
 - Lua errors use `setjmp`/`longjmp`, compiled to standard Wasm exception handling
   (`-mllvm -wasm-enable-sjlj -lsetjmp -mllvm -wasm-use-legacy-eh=false`). Chicory rejects the legacy EH opcodes, so the last flag is required.
 - The module exports `eval(ptr, len) -> status` and `result_ptr`/`result_len`; each eval runs in a fresh `lua_State`.
-- Out of scope: `redis.*`/`server.*`, Valkey's global sandboxing, script timeouts, performance.
+- `redis.call`/`redis.pcall` cross to Java via the `env.redis_call` import: the request is a RESP2 array of bulk strings,
+  the host returns a RESP2 reply, mapped to Lua as Redis does (status → `{ok=}`, error → `{err=}`, nil → `false`).
+  `redis.call` raises error replies; `redis.pcall` returns them. Pass the handler to `new ValkeyLua(wasm, handler)`.
+- Out of scope: rest of `redis.*`, `server.*`, script return → RESP conversion, RESP3, Valkey's global sandboxing, script timeouts, performance.
 - `os.tmpname` always errors (WASI has no temp dirs).
