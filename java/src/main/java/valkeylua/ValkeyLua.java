@@ -30,11 +30,14 @@ public final class ValkeyLua {
         var wasi = WasiPreview1.builder().withOptions(WasiOptions.builder().build()).build();
         var redis = new HostFunction("env", "redis_call",
                 FunctionType.of(List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of()),
+                // inst is the calling Wasm instance; args are (req_ptr, req_len, out_ptr, out_len) into its memory.
                 (inst, args) -> {
                     byte[] req = inst.memory().readBytes((int) args[0], (int) args[1]);
                     byte[] reply = redisCall.apply(parseRequest(req));
+                    // Copy the reply into a guest-allocated buffer; the C side owns and frees it.
                     int ptr = (int) inst.export("alloc").apply(reply.length)[0];
                     inst.memory().write(ptr, reply);
+                    // Wasm has no multi-value return here, so hand back pointer and length via the out-params.
                     inst.memory().writeI32((int) args[2], ptr);
                     inst.memory().writeI32((int) args[3], reply.length);
                     return null;
