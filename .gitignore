@@ -1,0 +1,3 @@
+lua/.deps/
+lua/lua.wasm
+java/target/
