@@ -784,10 +784,28 @@ static int server_math_randomseed(lua_State *L) {
     return 0;
 }
 
+/* kv is the RESP2 reply *2 [keys array, args array]. Sets globals KEYS and ARGV; on malformed input pushes an
+ * error message and returns 1 (status convention of lua_pcall). */
+static int setKeysArgv(lua_State *L, const char *kv, size_t kv_len) {
+    int error = 0;
+    if (!kv_len || kv[0] != '*' || pushReply(L, kv, kv + kv_len, &error) != kv + kv_len || error ||
+        !lua_istable(L, -1) || lua_objlen(L, -1) != 2) {
+        lua_settop(L, 0);
+        lua_pushstring(L, "malformed KEYS/ARGV buffer");
+        return 1;
+    }
+    lua_rawgeti(L, -1, 1);
+    lua_setglobal(L, "KEYS");
+    lua_rawgeti(L, -1, 2);
+    lua_setglobal(L, "ARGV");
+    lua_pop(L, 1);
+    return 0;
+}
+
 /* Runs a script in a fresh state. Returns 0 on success, 1 on Lua error.
  * The first return value (or the error message) is converted with tostring()
  * and left in result_ptr/result_len until the next call. */
-__attribute__((export_name("eval"))) int eval(const char *src, size_t len) {
+__attribute__((export_name("eval"))) int eval(const char *src, size_t len, const char *kv, size_t kv_len) {
     lua_State *L = luaL_newstate();
     loadLib(L, "", luaopen_base);
     loadLib(L, LUA_TABLIBNAME, luaopen_table);
@@ -847,7 +865,7 @@ __attribute__((export_name("eval"))) int eval(const char *src, size_t len) {
     lua_setglobal(L, "math");
 
     lua_pushcfunction(L, resetHostState);
-    int status = lua_pcall(L, 0, 0, 0) || luaL_loadbuffer(L, src, len, "@user_script") || lua_pcall(L, 0, 1, 0);
+    int status = lua_pcall(L, 0, 0, 0) || setKeysArgv(L, kv, kv_len) || luaL_loadbuffer(L, src, len, "@user_script") || lua_pcall(L, 0, 1, 0);
 
     /* Errors raised as {err=...} tables (e.g. by redis.call) report their message. */
     if (status && lua_istable(L, -1)) {

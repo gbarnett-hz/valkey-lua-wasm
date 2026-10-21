@@ -370,4 +370,22 @@ class ValkeyLuaTest {
         // luaL_error from a C function: luaL_where(1) prefixes the calling script's position; no ERR prefix.
         assertEquals("user_script:1: wrong number of arguments", lua.eval("return math.random(1, 2, 3)").value());
     }
+
+    private static byte[] b(String s) {
+        return s.getBytes(StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void keysAndArgv() {
+        var r = lua.eval("return #KEYS .. ' ' .. KEYS[1] .. ' ' .. #ARGV .. ' ' .. ARGV[2]",
+            List.of(b("k1")), List.of(b("a1"), b("a2")));
+        assertEquals("1 k1 2 a2", r.value());
+        assertEquals("0 0", ok("return #KEYS .. ' ' .. #ARGV"));
+    }
+
+    @Test
+    void keysAndArgvAreBinarySafe() {
+        var r = lua.eval("return #KEYS[1] .. ' ' .. #ARGV[1]", List.of(b("a\0b")), List.of(b("x\r\ny")));
+        assertEquals("3 4", r.value());
+    }
 }
