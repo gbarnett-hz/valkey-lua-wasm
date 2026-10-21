@@ -19,6 +19,7 @@ LUALIB_API int(luaopen_cjson)(lua_State *L);
 LUALIB_API int(luaopen_struct)(lua_State *L);
 LUALIB_API int(luaopen_cmsgpack)(lua_State *L);
 LUALIB_API int(luaopen_bit)(lua_State *L);
+void luaLockGlobals(lua_State *L); /* valkey_globals.c */
 
 /* Mirrors luaLoadLib/luaLoadLibraries in valkey src/modules/lua/script_lua.c. */
 static void loadLib(lua_State *L, const char *name, lua_CFunction f) {
@@ -795,10 +796,13 @@ static int setKeysArgv(lua_State *L, const char *kv, size_t kv_len) {
         lua_pushstring(L, "malformed KEYS/ARGV buffer");
         return 1;
     }
+    /* open global protection to set KEYS and ARGV */
+    lua_enablereadonlytable(L, LUA_GLOBALSINDEX, 0);
     lua_rawgeti(L, -1, 1);
     lua_setglobal(L, "KEYS");
     lua_rawgeti(L, -1, 2);
     lua_setglobal(L, "ARGV");
+    lua_enablereadonlytable(L, LUA_GLOBALSINDEX, 1);
     lua_pop(L, 1);
     return 0;
 }
@@ -864,6 +868,7 @@ __attribute__((export_name("eval"))) int eval(const char *src, size_t len, const
     lua_settable(L, -3);
     /* overwrite value of global variable 'math' with this modified math table present on top of stack. */
     lua_setglobal(L, "math");
+    luaLockGlobals(L);
 
     lua_pushcfunction(L, resetHostState);
     int status = lua_pcall(L, 0, 0, 0) || setKeysArgv(L, kv, kv_len) || luaL_loadbuffer(L, src, len, "@user_script") || lua_pcall(L, 0, 1, 0);

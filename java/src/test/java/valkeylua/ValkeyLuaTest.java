@@ -261,7 +261,38 @@ abstract class ValkeyLuaTest {
 
     @Test
     void luajavaBridgeIsNotReachableFromScripts() {
-        assertEquals("nil nil", ok("return tostring(java) .. ' ' .. tostring(debug.getregistry()._LOADED.java)"));
+        assertEquals("nil nil", ok("return tostring(rawget(_G, 'java')) .. ' ' .. tostring(rawget(_G, 'debug'))"));
+    }
+
+    @Test
+    void globalsAreValkeysAllowList() {
+        // Valkey also has __server__err__handler and __redis__err__handler (its EVAL error handler, not ported).
+        assertEquals("ARGV KEYS _G _VERSION assert bit cjson cmsgpack collectgarbage coroutine error gcinfo "
+                + "getmetatable ipairs load loadstring math next os pairs pcall rawequal rawget rawset redis select "
+                + "server setmetatable string struct table tonumber tostring type unpack xpcall",
+            String.join(" ", java.util.Arrays.stream(
+                ok("local t = {} for k in pairs(_G) do t[#t + 1] = k end return table.concat(t, ' ')").split(" "))
+                .sorted().toList()));
+    }
+
+    @Test
+    void globalsAreProtected() {
+        for (String[] c : new String[][] {
+                {"x = 1", "user_script:1: Attempt to modify a readonly table"},
+                {"rawset(_G, 'x', 1)", "Attempt to modify a readonly table"}, // raised in C, so no position
+                {"function f() end", "user_script:1: Attempt to modify a readonly table"},
+                {"string.x = 1", "user_script:1: Attempt to modify a readonly table"},
+                {"getmetatable('').__index = {}", "user_script:1: Attempt to modify a readonly table"},
+                {"setmetatable(_G, nil)", "Attempt to modify a readonly table"},
+                {"return y", "user_script:1: Script attempted to access nonexistent global variable 'y'"},
+                {"return print", "user_script:1: Script attempted to access nonexistent global variable 'print'"},
+                {"return debug", "user_script:1: Script attempted to access nonexistent global variable 'debug'"}}) {
+            assertEquals(new ValkeyLua.Result(false, c[1]), lua.eval(c[0]), c[0]);
+        }
+        // KEYS and ARGV are created after the lock, so their contents stay writable, as on Valkey.
+        var r = lua.eval("KEYS[1] = 'z' ARGV[2] = 'w' return KEYS[1] .. ARGV[2]", List.of(b("k")), List.of());
+        assertEquals("zw", r.value());
+        assertEquals("1", ok("local t = {} t.a = 1 return t.a"));
     }
 
     @Test

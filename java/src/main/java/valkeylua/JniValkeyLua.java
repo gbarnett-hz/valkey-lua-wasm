@@ -46,6 +46,10 @@ public final class JniValkeyLua extends ValkeyLua {
 
     private static native byte[] fpconvDtoa(double d);
 
+    private static native void lockGlobals(long L);
+
+    private static native void enableReadonlyGlobals(long L, boolean enabled);
+
     private static final int MAX_NESTED_COLLECTIONS_DEPTH = 256;
     private static final byte[] OK = "+OK\r\n".getBytes(StandardCharsets.US_ASCII);
 
@@ -465,10 +469,13 @@ public final class JniValkeyLua extends ValkeyLua {
             C.lua_pushstring(L, "malformed KEYS/ARGV buffer");
             return 1;
         }
+        // open global protection to set KEYS and ARGV
+        enableReadonlyGlobals(L, false);
         C.lua_rawgeti(L, -1, 1);
         C.lua_setglobal(L, "KEYS");
         C.lua_rawgeti(L, -1, 2);
         C.lua_setglobal(L, "ARGV");
+        enableReadonlyGlobals(L, true);
         C.lua_pop(L, 1);
         return 0;
     }
@@ -538,6 +545,7 @@ public final class JniValkeyLua extends ValkeyLua {
             setField(L, "random", this::serverMathRandom);
             setField(L, "randomseed", this::serverMathRandomseed);
             C.lua_setglobal(L, "math");
+            lockGlobals(L);
 
             byte[] src = script.getBytes(StandardCharsets.UTF_8);
             C.luaJ_pushfunction(L, (JFunction) this::resetHostState);

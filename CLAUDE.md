@@ -17,7 +17,8 @@ cd java && mvn test -Dtest='*ValkeyLuaTest#testName'       # one shared test, bo
 
 - macOS 27 Command Line Tools: `make -C native CXXFLAGS="-isystem $(xcrun --show-sdk-path)/usr/include/c++/v1"`.
 - `make -C lua` re-extracts Valkey by itself when `VALKEY_SHA` or a `lua/patches/*.patch` changes. `native/` does not:
-  after changing its sources, `rm -rf native/.deps/valkey`.
+  after changing its sources, `rm -rf native/.deps/valkey` (or `native/.deps/luajava` after changing its luajava
+  patch step).
 - `VALKEY_SHA` is pinned in both `lua/Makefile` and `native/Makefile`; keep them equal.
 
 ## Architecture
@@ -35,6 +36,8 @@ cd java && mvn test -Dtest='*ValkeyLuaTest#testName'       # one shared test, bo
 - JNI rules: a Lua error is a C++ exception and must never unwind through Java frames. Callbacks raise by returning
   `-1` with the error on the stack, and lauxlib error helpers are rebuilt in Java. Every Java→Lua call is protected
   (an unprotected error reaches luajava's panic handler and kills the JVM). luajava's `java` global is removed per state.
+- Globals protection is C shared by both builds (`lua/valkey_globals.c`); it runs after setup, so a global added
+  during setup must be on its allow list or it is dropped.
 - Each `eval` runs in a fresh `lua_State` on both backends. Not thread-safe.
 
 ## Fidelity rule and tests

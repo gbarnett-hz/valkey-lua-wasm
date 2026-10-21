@@ -9,6 +9,7 @@ int luaopen_cjson(lua_State *L);
 int luaopen_struct(lua_State *L);
 int luaopen_cmsgpack(lua_State *L);
 int luaopen_bit(lua_State *L);
+void luaLockGlobals(lua_State *L); /* lua/valkey_globals.c */
 
 /* Mirrors luaLoadLib in valkey src/modules/lua/script_lua.c. */
 static void loadLib(lua_State *L, const char *name, lua_CFunction f) {
@@ -40,4 +41,14 @@ JNIEXPORT jbyteArray JNICALL Java_valkeylua_JniValkeyLua_fpconvDtoa(JNIEnv *env,
     jbyteArray a = (*env)->NewByteArray(env, n);
     (*env)->SetByteArrayRegion(env, a, 0, n, (const jbyte *)buf);
     return a;
+}
+
+/* Valkey's globals protection; luajava doesn't know the readonly-table API of Valkey's Lua. */
+JNIEXPORT void JNICALL Java_valkeylua_JniValkeyLua_lockGlobals(JNIEnv *env, jclass cls, jlong L) {
+    luaLockGlobals((lua_State *)L);
+}
+
+JNIEXPORT void JNICALL Java_valkeylua_JniValkeyLua_enableReadonlyGlobals(JNIEnv *env, jclass cls, jlong L,
+                                                                      jboolean enabled) {
+    lua_enablereadonlytable((lua_State *)L, LUA_GLOBALSINDEX, enabled);
 }

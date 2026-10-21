@@ -67,11 +67,16 @@ What `native/valkey_jni.c` adds to luajava's natives, and why:
 - `pushlstring`: luajava 4.0.2 can only push a Java `String` (modified UTF-8, cut at NUL), so replies, `KEYS` and
   `ARGV` would not be binary-safe. Infinispan has this limitation.
 - `fpconvDtoa`: Valkey's number formatting for call arguments.
+- `lockGlobals`, `enableReadonlyGlobals`: Valkey's globals protection (`lua/valkey_globals.c`, shared with
+  `lua.wasm`); luajava doesn't know the read-only-table API of Valkey's Lua.
 
 JNI-specific hazards handled in `JniValkeyLua`:
 
 - luajava registers a `java` global (reflection over the whole JVM), also in `_LOADED`; both are removed per state.
-  luajava's metatables (`__jobject__`, `__jclass__`, ...) stay visible through `debug.getregistry()`.
+  luajava's metatables (`__jobject__`, `__jclass__`, ...) sit in the registry, which scripts can't reach now that
+  `debug` is gone.
+- After every Java call luajava writes a `__jthrowable__` global (a Java object when the call threw), which the
+  read-only globals reject. `native/Makefile` patches luajava's glue to keep it in the registry instead.
 - Lua errors are C++ exceptions and must never unwind through Java frames, so callbacks raise by returning `-1`
   and the lauxlib error helpers (`luaL_error`, `luaL_checkint`) are rebuilt in Java.
 - An unprotected Lua error reaches luajava's panic handler, which calls `FatalError` and kills the JVM. Every call
@@ -119,7 +124,13 @@ Ported from Valkey's `script_lua.c` (to C in `lua/valkey_lua.c` for Wasm, to Jav
   `call`/`pcall` arguments follow `luaArgsToServerArgv` (integer numbers print as integers, others via `fpconv_dtoa`).
 - Global patches: `pcall` is Valkey's `luaRedisPcall` wrapper (`{err=}` tables become strings); `math.random` and
   `math.randomseed` use Valkey's PRNG, so sequences match Valkey for the same seed.
-- `KEYS` and `ARGV` are set from `eval(script, keys, args)` before the script runs.
+- Globals protection (`lua/valkey_globals.c`, from Valkey's `script_lua.c`/`engine_lua.c`): globals are cut to
+  Valkey's allow list (so no `print`, `dofile`, `loadfile`, `newproxy`, `setfenv`, `getfenv` or `debug`), then the
+  globals table, every table reachable from it and the basic types' metatables become read-only. Setting a global
+  raises `Attempt to modify a readonly table`; reading an undefined one raises
+  `Script attempted to access nonexistent global variable 'x'`.
+- `KEYS` and `ARGV` are set from `eval(script, keys, args)` before the script runs, after the lock, so their
+  contents stay writable as on Valkey.
 - Uncaught `luaL_error`/`luaL_check*` errors from Lua C functions carry the script position, e.g.
   `user_script:1: wrong number of arguments`; errors raised as `{err=...}` tables (e.g. `ERR RESP version must be 2 or 3.`) do not.
 
@@ -272,6 +283,7 @@ exception, never a silently wrong value. An error reply is never "wrong type": i
 
 ## Not covered
 
-Globals protection / read-only tables, removing `debug`, script timeouts and SCRIPT KILL, RESP3 reply parsing,
+Script timeouts and SCRIPT KILL, RESP3 reply parsing,
 script return value → RESP conversion (eval still returns `tostring` of the result), FUNCTION/FCALL,
-EVAL's server-side error formatting (`script: <sha>, on @user_script:1.`), thread safety.
+EVAL's server-side error formatting (`script: <sha>, on @user_script:1.`) and its error-handler globals
+(`__server__err__handler`, `__redis__err__handler`), `lua-enable-insecure-api`, thread safety.

@@ -26,9 +26,9 @@ FLAGS := -O2 -fPIC -DLUA_ANSI -DENABLE_CJSON_GLOBAL -DLUA_USE_MKSTEMP -fexceptio
 	-I$(LJ)/jni/luajava -I$(LJ)/lua51/jni/mod -I$(LUA_SRC) -I$(VK)/deps/lua/etc -I$(VK)/deps/fpconv -I.
 
 C_SRCS := $(addprefix $(LUA_SRC)/,lua_cjson.c lua_cmsgpack.c lua_struct.c lua_bit.c strbuf.c fpconv.c) \
-	$(VK)/deps/fpconv/fpconv_dtoa.c valkey_jni.c
+	$(VK)/deps/fpconv/fpconv_dtoa.c valkey_jni.c ../lua/valkey_globals.c
 
-build/$(LIB): $(LJ) $(VK) all.cc valkey_jni.c
+build/$(LIB): $(LJ) $(VK) all.cc valkey_jni.c ../lua/valkey_globals.c
 	mkdir -p build/obj
 	$(CXX) $(FLAGS) $(CXXFLAGS) -c $(LJ)/lua51/jni/party_iroiro_luajava_lua51_Lua51Natives.cpp -o build/obj/natives.o
 	for f in $(C_SRCS); do $(CC) $(FLAGS) $(CFLAGS) -c $$f -o build/obj/$$(basename $$f .c).o || exit 1; done
@@ -40,6 +40,11 @@ $(LJ):
 	cd $@ && unzip -q ../sources.jar 'jni/luajava/*' 'lua51/jni/*' -x 'lua51/jni/lua51/*'
 	# Its luacustomamalg.h includes "all.cc"; ours (in this directory) amalgamates Valkey's Lua instead.
 	rm $(DEPS)/sources.jar
+	# After every Java call luajava writes the __jthrowable__ global, which Valkey's read-only globals reject (and
+	# which would hand scripts a Java object). Keep it in the registry instead.
+	perl -pi -e 's/lua_(set|get)global\(L, GLOBAL_THROWABLE\)/lua_$${1}field(L, LUA_REGISTRYINDEX, GLOBAL_THROWABLE)/' \
+		$@/jni/luajava/jua.h $@/jni/luajava/jualib.cpp
+	test $$(cat $@/jni/luajava/jua.h $@/jni/luajava/jualib.cpp | grep -c "LUA_REGISTRYINDEX, GLOBAL_THROWABLE") -eq 3
 
 $(VK):
 	mkdir -p $@
