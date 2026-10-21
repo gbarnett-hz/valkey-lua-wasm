@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,46 +40,78 @@ static char *hostCall(int op, const char *req, size_t req_len, size_t *reply_len
     return reply;
 }
 
-/* Port of luaPushErrorBuff in valkey src/modules/lua/script_lua.c (minus the ldb logging). */
-static char *trimCRLF(const char *s, size_t *len) {
-    while (*s == '\r' || *s == '\n') s++;
-    size_t n = strlen(s);
-    while (n > 0 && (s[n - 1] == '\r' || s[n - 1] == '\n')) n--;
-    *len = n;
-    return (char *)s;
+/* Stand-ins for the lm_* string helpers valkey's Lua module uses. */
+static char *lm_strcpy(const char *s) {
+    size_t n = strlen(s) + 1;
+    return memcpy(malloc(n), s, n);
 }
 
-/* Pushes an error table in the format server.pcall uses, {err="CODE msg"}.
- * There are two possible formats for the received `error` string:
- * 1) "-CODE msg": we remove the leading '-' since we don't store it as part of the lua error format.
- * 2) "msg":       we prepend a generic 'ERR' code since all error statuses need some error code.
- * Callers must not embed an error code in the message; pass "-CODE msg" if they want a specific code. */
+/* Trims, in place, any characters in cset from both ends. */
+static char *lm_strtrim(char *s, const char *cset) {
+    char *start = s, *end = s + strlen(s);
+    while (start < end && strchr(cset, *start)) start++;
+    while (end > start && strchr(cset, end[-1])) end--;
+    memmove(s, start, end - start);
+    s[end - start] = '\0';
+    return s;
+}
+
+static char *lm_asprintf(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    char *out = malloc(n + 1);
+    va_start(ap, fmt);
+    vsnprintf(out, n + 1, fmt, ap);
+    va_end(ap);
+    return out;
+}
+
+/* This function is used in order to push an error on the Lua stack in the
+ * format used by server.pcall to return errors, which is a lua table
+ * with an "err" field set to the error string including the error code.
+ * Note that this table is never a valid reply by proper commands,
+ * since the returned tables are otherwise always indexed by integers, never by strings.
+ *
+ * The function takes ownership on the given err_buffer. */
 static void luaPushErrorBuff(lua_State *lua, const char *err_buffer) {
-    const char *code = "ERR";
-    size_t code_len = 3, msg_len;
-    const char *msg;
+    char *msg;
+
+    char *final_msg = NULL;
+    /* There are two possible formats for the received `error` string:
+     * 1) "-CODE msg": we remove the leading '-' since we don't store it as part of the lua error format.
+     * 2) "msg":       we prepend a generic 'ERR' code since all error statuses need some error code.
+     * We support format (1) so this function can reuse the error messages used in other places.
+     * We support format (2) so it'll be easy to pass descriptive errors to this function without worrying about format.
+     * Callers must not embed an error code in the message — pass "-CODE msg" if they want a specific code.
+     */
     if (err_buffer[0] == '-') {
-        const char *sp = strchr(err_buffer, ' ');
-        if (!sp) {
-            msg = trimCRLF(err_buffer + 1, &msg_len);
+        /* derive error code from the message */
+        char *err_msg = strstr(err_buffer, " ");
+        if (!err_msg) {
+            msg = lm_strcpy(err_buffer + 1);
+            final_msg = lm_asprintf("ERR %s", msg);
         } else {
-            code = err_buffer + 1;
-            code_len = sp - code;
-            msg = trimCRLF(sp + 1, &msg_len);
+            *err_msg = '\0';
+            msg = lm_strcpy(err_msg + 1);
+            msg = lm_strtrim(msg, "\r\n");
+            final_msg = lm_asprintf("%s %s", err_buffer + 1, msg);
         }
     } else {
-        msg = trimCRLF(err_buffer, &msg_len);
+        msg = lm_strcpy(err_buffer);
+        msg = lm_strtrim(msg, "\r\n");
+        final_msg = lm_asprintf("ERR %s", msg);
     }
-    char *final_msg = malloc(code_len + 1 + msg_len + 1);
-    memcpy(final_msg, code, code_len);
-    final_msg[code_len] = ' ';
-    memcpy(final_msg + code_len + 1, msg, msg_len);
-    final_msg[code_len + 1 + msg_len] = '\0';
+    /* Trim newline at end of string. If we reuse the ready-made error objects (case 1 above) then we might
+     * have a newline that needs to be trimmed. In any case the lua server error table shouldn't end with a newline. */
 
     lua_newtable(lua);
     lua_pushstring(lua, "err");
     lua_pushstring(lua, final_msg);
     lua_settable(lua, -3);
+
+    free(msg);
     free(final_msg);
 }
 
