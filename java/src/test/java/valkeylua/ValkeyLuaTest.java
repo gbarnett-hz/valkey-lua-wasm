@@ -108,6 +108,58 @@ abstract class ValkeyLuaTest {
     }
 
     @Test
+    void typedTableReplies() {
+        assertEquals(status("a  b"), ok("return {ok='a\\r\\nb'}"));
+        assertEquals(status("a"), ok("return {ok='a\\0b'}"));
+        assertEquals(error("a  b"), ok("return {err='a\\r\\nb\\r\\n'}"));
+        assertEquals(error("a"), ok("return {err='a\\0b'}"));
+        assertEquals(array(), ok("return {err=42}")); // not a string: the array case
+        assertEquals(bulk("1.5"), ok("return {double=1.5}"));
+        assertEquals(bulk("3"), ok("return {double=3}"));
+        assertEquals(bulk("nan"), ok("return {double=0/0}"));
+        assertEquals(bulk("inf"), ok("return {double=1/0}"));
+        assertEquals(bulk("-inf"), ok("return {double=-1/0}"));
+        assertEquals(bulk("-0"), ok("return {double=-1/(1/0)}"));
+        assertEquals(bulk("0.1"), ok("return {double=0.1}"));
+        assertEquals(bulk("123  "), ok("return {big_number='123\\r\\n'}"));
+        assertEquals(bulk("a\0b"), ok("return {verbatim_string={format='txt', string='a\\0b'}}"));
+        assertEquals(array(bulk("a"), integer(1)), ok("return {map={a=1}}"));
+        assertEquals(array(bulk("a")), ok("return {set={a=true}}"));
+        assertEquals(array(integer(1), error("e")), ok("return {1, {err='e'}}"));
+        assertEquals(bulk("ÿ\0x"), ok("return '\\255\\0x'"));
+    }
+
+    @Test
+    void raisedErrorFormats() {
+        assertEquals(error("42 script: on @user_script:1."), err("error({err=42})"));
+        assertEquals(error("ERR unknown error script: on @user_script:1."), err("error({})"));
+        assertEquals(error("ERR nil script: on @user_script:1."), err("error(nil)"));
+        assertEquals(error("ERR user_script:2: x script: on @user_script:2."),
+            err("local function f()\nerror('x')\nend\nf()"));
+        // A newline in a compile message becomes a space.
+        assertEquals(error("ERR Error compiling script (new function): user_script:2: '<eof>' expected near '[[a b]]'"),
+            err("return 1 [[a\nb]]"));
+        assertEquals(integer(1), ok("return 1")); // instance still usable
+    }
+
+    @Test
+    void resp3BooleansAndReset() {
+        var l = create(new Handler() {
+            public byte[] call(List<byte[]> a) { return "+OK\r\n".getBytes(UTF_8); }
+            public byte[] setResp(int v) { return "+OK\r\n".getBytes(UTF_8); }
+        });
+        assertEquals(integer(0), okOn(l, "redis.setresp(3) return false"));
+        assertEquals(integer(1), okOn(l, "redis.setresp(3) return true"));
+        assertEquals(NULL, okOn(l, "return false")); // each eval starts at RESP 2
+    }
+
+    static final String[] INT64_EDGES = {"return 2^63", "return -2^63-1e5", "return 1/0", "return -1/0", "return 0/0"};
+
+    List<String> int64Edges() {
+        return java.util.Arrays.stream(INT64_EDGES).map(this::ok).toList();
+    }
+
+    @Test
     void plainLua() {
         assertEquals(bulk("hello 3"), ok("return string.format('hello %d', 1 + 2)"));
     }
