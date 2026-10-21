@@ -6,8 +6,8 @@ import java.util.List;
 public interface Handler {
 
     /**
-     * redis.call/redis.pcall: receives the command arguments, returns the command's RESP2 reply. A thrown
-     * RuntimeException becomes an {@code -ERR <message>} reply.
+     * redis.call/redis.pcall: receives the command arguments, returns the command's RESP2 reply. Anything thrown
+     * (including an {@code Error}) becomes an {@code -ERR <message>} reply.
      */
     byte[] call(List<byte[]> args);
 

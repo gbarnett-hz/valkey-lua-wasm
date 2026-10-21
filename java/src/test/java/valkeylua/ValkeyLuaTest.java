@@ -1,6 +1,7 @@
 package valkeylua;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
@@ -147,7 +148,8 @@ class ValkeyLuaTest {
 
     @Test
     void malformedReplyIsScriptError() {
-        for (String bad : List.of("", "hello", "$5\r\nab", "*2\r\n:1\r\n")) {
+        for (String bad : List.of("", "hello", "$5\r\nab", "*2\r\n:1\r\n", "+OK\r\ngarbage", "+OK\r\n+OK\r\n",
+                ":9223372036854775808\r\n", ":-9223372036854775809\r\n", "*1\r\n".repeat(10000) + ":1\r\n")) {
             reply = bad;
             for (String fn : List.of("call", "pcall")) {
                 var r = lua.eval("return redis." + fn + "('GET', 'k')");
@@ -157,6 +159,20 @@ class ValkeyLuaTest {
         }
         reply = "+OK\r\n";
         assertEquals("OK", ok("return redis.call('PING').ok"));
+    }
+
+    @Test
+    void fullLongLongRangeIntegerReplies() {
+        reply = ":9223372036854775807\r\n";
+        assertEquals("true", ok("return tostring(redis.call('X') > 9e18)"));
+        reply = ":-9223372036854775808\r\n";
+        assertEquals("true", ok("return tostring(redis.call('X') < -9e18)"));
+    }
+
+    @Test
+    void nestedReplyUpToDepthLimitConverts() {
+        reply = "*1\r\n".repeat(200) + ":1\r\n";
+        assertEquals("1", ok("local r = redis.call('X') for i = 1, 200 do r = r[1] end return r"));
     }
 
     @Test
@@ -212,6 +228,41 @@ class ValkeyLuaTest {
     void exceptionWithoutMessageUsesClassName() {
         var l = new ValkeyLua(WASM, args -> { throw new NullPointerException(); });
         assertEquals("ERR NullPointerException", okOn(l, "return redis.pcall('GET', 'k').err"));
+    }
+
+    @Test
+    void handlerReturningNullIsScriptError() {
+        var l = new ValkeyLua(WASM, args -> null);
+        for (int i = 0; i < 100; i++) {
+            assertEquals("ERR handler returned null", okOn(l, "return redis.pcall('GET', 'k').err"));
+        }
+        assertEquals("2", okOn(l, "return 1 + 1"));
+    }
+
+    @Test
+    void handlerErrorBecomesScriptError() {
+        var l = new ValkeyLua(WASM, args -> { throw new StackOverflowError(); });
+        assertEquals("ERR StackOverflowError", okOn(l, "return redis.pcall('GET', 'k').err"));
+        var l2 = new ValkeyLua(WASM, args -> { throw new AssertionError("bad"); });
+        assertEquals("ERR bad", okOn(l2, "return redis.pcall('GET', 'k').err"));
+    }
+
+    @Test
+    void escapedExceptionPoisonsInstance() {
+        assertThrows(NullPointerException.class, () -> lua.eval("return 1", (byte[]) null));
+        var e = assertThrows(IllegalStateException.class, () -> lua.eval("return 1"));
+        assertEquals("ValkeyLua instance is unusable after an escaped exception; create a new one", e.getMessage());
+    }
+
+    @Test
+    void binaryCallArgumentsReachHandlerExactly() {
+        var got = new ArrayList<byte[]>();
+        var l = new ValkeyLua(WASM, args -> { got.addAll(args); return "+OK\r\n".getBytes(StandardCharsets.UTF_8); });
+        okOn(l, "return redis.call('SET', 'a\\0b', 'x\\r\\ny').ok");
+        assertEquals(3, got.size());
+        assertTrue(java.util.Arrays.equals(b("SET"), got.get(0)));
+        assertTrue(java.util.Arrays.equals(new byte[] {'a', 0, 'b'}, got.get(1)));
+        assertTrue(java.util.Arrays.equals(new byte[] {'x', '\r', '\n', 'y'}, got.get(2)));
     }
 
     @Test

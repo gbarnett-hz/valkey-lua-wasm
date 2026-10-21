@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
@@ -170,23 +171,21 @@ static void luaProcessReplyError(const char *err, lua_State *lua) {
 
 /* Parses the integer in [p, line_end); returns 0 if it is not one. */
 static int parseInt(const char *p, const char *line_end, long long *out) {
-    int neg = 0;
-    if (p < line_end && *p == '-') neg = 1, p++;
-    if (p == line_end || line_end - p > 18) return 0;
-    long long n = 0;
-    for (; p < line_end; p++) {
-        if (*p < '0' || *p > '9') return 0;
-        n = n * 10 + (*p - '0');
-    }
-    *out = neg ? -n : n;
-    return 1;
+    /* strtoll() would also skip leading whitespace and accept '+'. */
+    if (p == line_end || (*p != '-' && (*p < '0' || *p > '9'))) return 0;
+    char *e;
+    errno = 0;
+    *out = strtoll(p, &e, 10);
+    return e == line_end && !errno;
 }
 
+#define MAX_NESTED_COLLECTIONS_DEPTH 256
+
 /* Pushes one RESP2 reply as Lua, using Valkey's RESP2 -> Lua mapping. Returns the position after the reply,
- * or NULL if it is malformed or truncated; never reads past end. Sets *error if an error reply appears at any depth. */
-static const char *pushReply(lua_State *L, const char *p, const char *end, int *error) {
-    /* Also bounds the recursion depth: Lua's C stack limit makes this fail on absurdly nested arrays. */
-    if (p >= end || !lua_checkstack(L, 3)) return NULL;
+ * or NULL if it is malformed, truncated or nested deeper than MAX_NESTED_COLLECTIONS_DEPTH; never reads past end.
+ * Sets *error if an error reply appears at any depth. */
+static const char *pushReply(lua_State *L, const char *p, const char *end, int *error, int depth) {
+    if (p >= end || depth > MAX_NESTED_COLLECTIONS_DEPTH || !lua_checkstack(L, 3)) return NULL;
     char type = *p++;
     const char *line = p;
     const char *eol = NULL;
@@ -237,7 +236,7 @@ static const char *pushReply(lua_State *L, const char *p, const char *end, int *
         if (n > end - p) return NULL; /* every element takes at least one byte */
         lua_newtable(L);
         for (long long i = 1; i <= n; i++) {
-            p = pushReply(L, p, end, error);
+            p = pushReply(L, p, end, error, depth + 1);
             if (!p) return NULL;
             lua_rawseti(L, -2, (int)i);
         }
@@ -444,9 +443,10 @@ static int redisGenericCommand(lua_State *L, int raise_error) {
     const char *req = lua_tolstring(L, -1, &req_len);
     char *reply = hostCall(OP_CALL, req, req_len, &reply_len);
     int error = 0;
-    const char *end = pushReply(L, reply, reply + reply_len, &error) ? reply + reply_len : NULL;
+    /* Trailing bytes after the reply make it malformed too. */
+    int malformed = !reply_len || pushReply(L, reply, reply + reply_len, &error, 0) != reply + reply_len;
     free(reply);
-    if (!end) {
+    if (malformed) {
         luaPushError(L, "unexpected reply from handler for server.call");
         return lua_error(L);
     }
@@ -645,7 +645,8 @@ static int luaLogCommand(lua_State *lua) {
         return lua_error(lua);
     }
 
-    /* Glue together all the arguments (non-string ones are skipped, as in Valkey). */
+    /* Glue together all the arguments, as Valkey does, except that a non-string first argument is simply skipped
+     * and NULs are kept (Valkey formats with %s, which truncates at a NUL). */
     luaL_Buffer msg;
     luaL_buffinit(lua, &msg);
     for (j = 1; j < argc; j++) {
@@ -788,7 +789,7 @@ static int server_math_randomseed(lua_State *L) {
  * error message and returns 1 (status convention of lua_pcall). */
 static int setKeysArgv(lua_State *L, const char *kv, size_t kv_len) {
     int error = 0;
-    if (!kv_len || kv[0] != '*' || pushReply(L, kv, kv + kv_len, &error) != kv + kv_len || error ||
+    if (!kv_len || kv[0] != '*' || pushReply(L, kv, kv + kv_len, &error, 0) != kv + kv_len || error ||
         !lua_istable(L, -1) || lua_objlen(L, -1) != 2) {
         lua_settop(L, 0);
         lua_pushstring(L, "malformed KEYS/ARGV buffer");

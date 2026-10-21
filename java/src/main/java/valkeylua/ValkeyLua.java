@@ -15,6 +15,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 /** Runs scripts on Valkey's bundled Lua compiled to lua.wasm. Not thread-safe. */
 public final class ValkeyLua {
@@ -22,6 +23,8 @@ public final class ValkeyLua {
     public record Result(boolean ok, String value) {}
 
     private final Instance instance;
+    // Set once anything escapes eval: the Wasm shadow stack pointer is then not restored, so later evals would trap.
+    private boolean poisoned;
 
     // Op codes of env.host_call; keep in sync with the enum in valkey_lua.c.
     private static final int OP_CALL = 0, OP_SETRESP = 1, OP_SET_REPL = 2, OP_LOG = 3, OP_ACL_CHECK_CMD = 4;
@@ -39,8 +42,9 @@ public final class ValkeyLua {
                     byte[] req = inst.memory().readBytes((int) args[1], (int) args[2]);
                     byte[] reply;
                     try {
-                        reply = dispatch(handler, (int) args[0], parseRequest(req));
-                    } catch (RuntimeException e) {
+                        reply = Objects.requireNonNull(dispatch(handler, (int) args[0], parseRequest(req)),
+                                "handler returned null");
+                    } catch (Throwable e) {
                         String msg = e.getMessage();
                         msg = msg == null ? e.getClass().getSimpleName() : msg.replace('\r', ' ').replace('\n', ' ');
                         reply = ("-ERR " + msg + "\r\n").getBytes(StandardCharsets.UTF_8);
@@ -99,6 +103,18 @@ public final class ValkeyLua {
 
     /** Package-private seam so tests can pass a raw (possibly malformed) KEYS/ARGV buffer. */
     Result eval(String script, byte[] kv) {
+        if (poisoned) {
+            throw new IllegalStateException("ValkeyLua instance is unusable after an escaped exception; create a new one");
+        }
+        try {
+            return evalUnchecked(script, kv);
+        } catch (Throwable e) {
+            poisoned = true;
+            throw e;
+        }
+    }
+
+    private Result evalUnchecked(String script, byte[] kv) {
         byte[] src = script.getBytes(StandardCharsets.UTF_8);
         int ptr = (int) instance.export("alloc").apply(src.length)[0];
         int kvPtr = (int) instance.export("alloc").apply(kv.length)[0];
