@@ -4,6 +4,7 @@ POC: Valkey's bundled Lua 5.1 (`deps/lua/src`, with cjson, cmsgpack, struct and 
 
 ```sh
 make -C lua          # downloads wasi-sdk 34 + pinned Valkey sources, builds lua/lua.wasm
+make -C lua clean    # removes lua/lua.wasm (keeps the downloaded .deps)
 cd java && mvn test  # loads lua.wasm in Chicory and runs scripts against each library
 ```
 
