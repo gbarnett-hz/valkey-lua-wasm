@@ -29,6 +29,10 @@ On macOS 27 Command Line Tools, clang++ may not find libc++ headers; pass
 Both backends run each `eval` in a fresh `lua_State` and are not thread-safe. The shared code (`ValkeyLua`) encodes
 `KEYS`/`ARGV`, turns handler exceptions into `-ERR` replies and poisons the instance when anything escapes `eval`.
 
+Agent skills ([superpowers](https://github.com/obra/superpowers)) are tracked by `skills-lock.json` only; the installed
+copies (`.agents/`, `.claude/`) are git-ignored. Restore them with `npx skills experimental_install`. The lock pins each
+skill's source and content hash, not a commit, so a restore fetches upstream's current version.
+
 ## Wasm backend
 
 - Lua errors use `setjmp`/`longjmp`, compiled to standard Wasm exception handling

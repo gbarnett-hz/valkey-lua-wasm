@@ -3,3 +3,5 @@ lua/lua.wasm
 native/.deps/
 native/build/
 java/target/
+.claude/
+.agents/
