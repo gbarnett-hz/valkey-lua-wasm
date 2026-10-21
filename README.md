@@ -1,24 +1,55 @@
-# wasm-valkey-lua
+# wasm-valkey-lua — `jni-luajava` branch
 
-POC: Valkey's bundled Lua 5.1 (`deps/lua/src`, with cjson, cmsgpack, struct and bit) compiled to Wasm and run on [Chicory](https://github.com/dylibso/chicory).
+Comparison branch: the same `ValkeyLua`/`Handler` API and test suite as `main`, but built the way Infinispan runs Lua
+(JNI over a native Lua through [luajava](https://github.com/gudzpoz/luajava)) instead of Wasm on Chicory.
+Not for merging into `main`.
 
 ```sh
-make -C lua          # downloads wasi-sdk 34 + pinned Valkey sources, builds lua/lua.wasm
-make -C lua clean    # removes lua/lua.wasm (keeps the downloaded .deps)
-rm -rf lua/.deps/valkey  # after pulling a change to the pinned Valkey sources; the extract rule won't refresh it
-cd java && mvn test  # loads lua.wasm in Chicory and runs scripts against each library
+make -C native        # downloads luajava's JNI glue + pinned Valkey sources, builds native/build/liblua51<arch>.<so|dylib>
+make -C native clean  # removes native/build (keeps the downloaded .deps)
+cd java && mvn test   # packages the native library on the classpath and runs the same tests as main
 ```
 
-- Lua errors use `setjmp`/`longjmp`, compiled to standard Wasm exception handling
-  (`-mllvm -wasm-enable-sjlj -lsetjmp -mllvm -wasm-use-legacy-eh=false`). Chicory rejects the legacy EH opcodes, so the last flag is required.
-- Runs on Chicory's runtime compiler (`lua.wasm` → JVM bytecode at instantiation), not the default interpreter.
-- The module exports `eval(src_ptr, src_len, kv_ptr, kv_len) -> status` and `result_ptr`/`result_len`; each eval runs in a fresh `lua_State`.
-- Host calls cross to Java via the single `env.host_call` import (see below). Pass the handler to `new ValkeyLua(wasm, handler)`.
-- `os.tmpname` always errors (WASI has no temp dirs).
+On macOS 27 Command Line Tools, clang++ may not find libc++ headers; pass
+`CXXFLAGS="-isystem $(xcrun --show-sdk-path)/usr/include/c++/v1"` to `make`.
 
-## What runs inside the module
+## How it maps to Infinispan
 
-Ported from Valkey's `script_lua.c`, so argument checks and error strings match Valkey:
+| | Infinispan (`server/resp`) | This branch |
+|---|---|---|
+| Java binding | `party.iroiro.luajava:lua51:4.0.2`, `gdx-jnigen-loader:2.5.2` | same |
+| JNI glue | luajava 4.0.2, rebuilt in `infinispan/infinispan-lua` (`org.infinispan:infinispan-lua51-platform`) | the same generated sources, taken from that artifact's `-sources.jar` (byte-identical to running jnigen on luajava v4.0.2) |
+| Lua | `redis/redis` `deps/lua`, with luajava's `luaconf.h` | Valkey's `deps/lua` at the SHA `main` uses; the one needed `luaconf.h` change (`LUAI_DATA extern`) is in `native/all.cc` |
+| cjson, cmsgpack, struct, bit | not available | compiled in, opened by `native/valkey_jni.c` |
+| `redis.*` API | Java `JFunction`s | Java `JFunction`s: a port of `main`'s `valkey_lua.c` against the raw Lua C API (`Lua51Natives`) |
+
+What `native/valkey_jni.c` adds to luajava's natives, and why:
+
+- `openValkeyLibs`: luajava's `luaJ_openlib` only knows the stock libraries.
+- `pushlstring`: luajava 4.0.2 can only push a Java `String` (modified UTF-8, cut at NUL), so replies, `KEYS` and
+  `ARGV` would not be binary-safe. Infinispan has this limitation.
+- `fpconvDtoa`: Valkey's number formatting for call arguments.
+
+JNI-specific hazards handled in `ValkeyLua`:
+
+- luajava registers a `java` global (reflection over the whole JVM), also in `_LOADED`; both are removed per state.
+  luajava's metatables (`__jobject__`, `__jclass__`, ...) stay visible through `debug.getregistry()`.
+- Lua errors are C++ exceptions and must never unwind through Java frames, so callbacks raise by returning `-1`
+  and the lauxlib error helpers (`luaL_error`, `luaL_checkint`) are rebuilt in Java.
+- An unprotected Lua error reaches luajava's panic handler, which calls `FatalError` and kills the JVM. Every call
+  from Java into Lua is protected; where `main` would trap (a failing `__tostring` on the result), this branch throws
+  and poisons the instance.
+
+Found by diffing probe scripts against `main`: `lua.wasm` is wasm32, so `lua_Integer` and C `long` are 32-bit there.
+`string.format('%d', 2^40)` gives `2147483647` and `struct.pack('<i8', 2^40)` truncates on `main`; this branch, like
+64-bit Valkey, gets them right.
+
+- The natives are loaded once per JVM; each `eval` runs in a fresh `lua_State` (`new Lua51()`), as on `main`.
+- `os.tmpname` works (native `mkstemp`), unlike on `main`.
+
+## What runs in Lua (before the Handler)
+
+Ported from Valkey's `script_lua.c` (via `main`'s `valkey_lua.c`, into Java), so argument checks and error strings match Valkey:
 
 - `server` global, with `redis` aliased to the same table.
 - `sha1hex`, `error_reply`, `status_reply` (on bad arguments these *return* an error table rather than raise, as in Valkey),
@@ -26,7 +57,7 @@ Ported from Valkey's `script_lua.c`, so argument checks and error strings match 
 - Constants: `REPL_NONE/AOF/SLAVE/REPLICA/ALL`, `LOG_DEBUG/VERBOSE/NOTICE/WARNING` (Valkey's values),
   `REDIS_VERSION`, `REDIS_VERSION_NUM`, `VALKEY_VERSION`, `VALKEY_VERSION_NUM`, `SERVER_NAME`
   (set via `ServerInfo`; the default is `7.2.4` / `255.255.255` / `valkey`).
-- Argument validation for every delegated function runs in C first; the handler only sees requests that passed it.
+- Argument validation for every delegated function runs first; the handler only sees requests that passed it.
   `call`/`pcall` arguments follow `luaArgsToServerArgv` (integer numbers print as integers, others via `fpconv_dtoa`).
 - Global patches: `pcall` is Valkey's `luaRedisPcall` wrapper (`{err=}` tables become strings); `math.random` and
   `math.randomseed` use Valkey's PRNG, so sequences match Valkey for the same seed.
@@ -36,16 +67,15 @@ Ported from Valkey's `script_lua.c`, so argument checks and error strings match 
 
 ## What is delegated to the Handler
 
-All go through the single import `env.host_call(op, req_ptr, req_len, out_ptr, out_len)`; the request is a RESP2 array of
-bulk strings and the reply is RESP2.
+Called directly from the Java `JFunction`s; replies are RESP2.
 
-| Lua | `Handler` method | `op` |
-|---|---|---|
-| `call`, `pcall` | `call(List<byte[]> args)` | 0 |
-| `setresp(v)` | `setResp(int version)` | 1 |
-| `set_repl(flags)` | `setRepl(int flags)` | 2 |
-| `log(level, msg...)` | `log(int level, String message)` (arguments joined with single spaces) | 3 |
-| `acl_check_cmd(argv...)` | `aclCheckCmd(List<byte[]> args)` | 4 |
+| Lua | `Handler` method |
+|---|---|
+| `call`, `pcall` | `call(List<byte[]> args)` |
+| `setresp(v)` | `setResp(int version)` |
+| `set_repl(flags)` | `setRepl(int flags)` |
+| `log(level, msg...)` | `log(int level, String message)` (arguments joined with single spaces) |
+| `acl_check_cmd(argv...)` | `aclCheckCmd(List<byte[]> args)` |
 
 ## Handler interface
 
@@ -59,12 +89,12 @@ public interface Handler {
 }
 ```
 
-`Handler` is a functional interface, so `new ValkeyLua(wasm, args -> ...)` works. `setResp`/`setRepl` state applies to the
+`Handler` is a functional interface, so `new ValkeyLua(args -> ...)` works. `setResp`/`setRepl` state applies to the
 rest of the current `eval`; the handler holds it. `aclCheckCmd` replies `:1`/`:0` or an error; checking that the command
 exists is the handler's job.
 
-**Per-eval reset.** At the start of every `eval`, before the script runs, the module calls `setResp(2)` then
-`setRepl(REPL_ALL)` (3) through `host_call`, as Valkey resets `resp` and the replication flags on each run. A handler
+**Per-eval reset.** At the start of every `eval`, before the script runs, `ValkeyLua` calls `setResp(2)` then
+`setRepl(REPL_ALL)` (3), as Valkey resets `resp` and the replication flags on each run. A handler
 that logs or counts calls sees these on every `eval`, even if the script never calls `setresp`/`set_repl`. If either
 returns an error reply, `eval` returns `Result(ok=false, <err>)` without running the script.
 
@@ -85,14 +115,14 @@ Handler handler = args -> {
             return ("-ERR unknown command '" + cmd + "'\r\n").getBytes();
     }
 };
-var vl = new ValkeyLua(Path.of("lua/lua.wasm"), handler);
+var vl = new ValkeyLua(handler);
 var r = vl.eval("redis.call('SET', KEYS[1], ARGV[1]); return redis.call('GET', KEYS[1])",
         List.of("k".getBytes()), List.of("v".getBytes()));   // Result[ok=true, value=v]
 ```
 
 ## Reply contract
 
-Every delegated operation returns a RESP2 reply. The module turns it into what the script sees, as Valkey does.
+Every delegated operation returns a RESP2 reply. `ValkeyLua` turns it into what the script sees, as Valkey does.
 
 ### Success
 
@@ -116,7 +146,7 @@ The other delegated operations:
 | `acl_check_cmd` | `:1` / `:0` | `true` / `false` |
 
 **Wrong reply type** (decided with the user): if a handler returns a reply outside the table above, e.g. `+OK` from
-`aclCheckCmd` or `:5` from `setResp`, the module raises `{err="ERR unexpected reply from handler for <fn>"}`
+`aclCheckCmd` or `:5` from `setResp`, `ValkeyLua` raises `{err="ERR unexpected reply from handler for <fn>"}`
 (`<fn>` = the Lua function name, e.g. `server.acl_check_cmd`). This is a broken handler, treated like a thrown
 exception, never a silently wrong value. An error reply is never "wrong type": it follows the Errors rules.
 `call`/`pcall` accept any well-formed RESP2 reply (arrays nested at most 256 deep, Valkey's
@@ -136,11 +166,11 @@ exception, never a silently wrong value. An error reply is never "wrong type": i
    | `setresp`, `set_repl`, `log`, `acl_check_cmd` | `-ERR ...` | Lua error raising `{err="ERR ..."}` |
 
 3. **Error tables use Valkey's format** (`luaPushErrorBuff`, `script_lua.c:265`): leading `-` stripped, a bare
-   message gets an `ERR ` prefix, trailing CRLF trimmed. Errors raised by the in-module checks use the same path,
+   message gets an `ERR ` prefix, trailing CRLF trimmed. Errors raised by the argument checks use the same path,
    so `redis.setresp(4)` raises `{err="ERR RESP version must be 2 or 3."}`.
-4. **Command error rewrites happen in C, on prefix alone** (decided with the user). Valkey's `luaProcessReplyError`
+4. **Command error rewrites happen before the script sees them, on prefix alone** (decided with the user). Valkey's `luaProcessReplyError`
    (`script_lua.c:745`) rewrites four command errors before the script sees them, keyed on the server's `errno` plus a
-   prefix. `errno` does not exist across the Wasm boundary, so the module matches the prefix only:
+   prefix. The handler returns bytes, not `errno`, so the port matches the prefix only (as on `main`):
 
    | Handler's `call`/`pcall` reply | Script sees `err` |
    |---|---|
@@ -168,8 +198,8 @@ exception, never a silently wrong value. An error reply is never "wrong type": i
 6. **`ValkeyLua` catches anything a handler throws** (any `Throwable`, including `Error`s such as
    `StackOverflowError`) and turns it into `-ERR <message>` (CR/LF become spaces; the class's simple name if there is
    no message), so a buggy mapping becomes a script error instead of unwinding past Lua. A handler returning `null`
-   becomes `-ERR handler returned null`. If anything still escapes `eval` (e.g. Chicory's own call-stack limit), the
-   Wasm stack is left unrestored, so that `eval` rethrows and the instance is poisoned: every later `eval` throws
+   becomes `-ERR handler returned null`. If anything still escapes `eval` (e.g. a failing `__tostring` on the
+   result), that `eval` rethrows and the instance is poisoned, as on `main`: every later `eval` throws
    `IllegalStateException`; create a new `ValkeyLua`.
 7. Uncaught Lua errors end `eval` with `Result(ok=false, message)`, where message is the error table's `err`
    field (current behaviour, unchanged).
@@ -179,7 +209,7 @@ exception, never a silently wrong value. An error reply is never "wrong type": i
 - Command error rewrites match on the message prefix only (Valkey also checks `errno`), so an unrelated error starting with
   one of the four prefixes is rewritten too.
 - `setresp(3)` is rejected by the default handler (`ERR RESP3 is not supported`); Valkey accepts it.
-- RESP2 only between module and host.
+- RESP2 only between Lua and the Handler.
 
 ## Not covered
 

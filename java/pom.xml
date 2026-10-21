@@ -5,30 +5,26 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>valkeylua</groupId>
-    <artifactId>valkey-lua-wasm-poc</artifactId>
+    <artifactId>valkey-lua-jni-poc</artifactId>
     <version>0.1.0-SNAPSHOT</version>
 
     <properties>
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <chicory.version>1.7.5</chicory.version>
+        <luajava.version>4.0.2</luajava.version>
     </properties>
 
     <dependencies>
+        <!-- Same luajava and loader versions as Infinispan; the natives come from ../native (make -C native). -->
         <dependency>
-            <groupId>com.dylibso.chicory</groupId>
-            <artifactId>runtime</artifactId>
-            <version>${chicory.version}</version>
+            <groupId>party.iroiro.luajava</groupId>
+            <artifactId>lua51</artifactId>
+            <version>${luajava.version}</version>
         </dependency>
         <dependency>
-            <groupId>com.dylibso.chicory</groupId>
-            <artifactId>wasi</artifactId>
-            <version>${chicory.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.dylibso.chicory</groupId>
-            <artifactId>compiler</artifactId>
-            <version>${chicory.version}</version>
+            <groupId>com.badlogicgames.gdx</groupId>
+            <artifactId>gdx-jnigen-loader</artifactId>
+            <version>2.5.2</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -39,6 +35,14 @@
     </dependencies>
 
     <build>
+        <resources>
+            <resource>
+                <directory>../native/build</directory>
+                <includes>
+                    <include>liblua51*</include>
+                </includes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <artifactId>maven-surefire-plugin</artifactId>

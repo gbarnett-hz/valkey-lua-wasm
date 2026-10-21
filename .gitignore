@@ -1,3 +1,6 @@
+native/.deps/
+native/build/
+java/target/
+# main's Wasm build outputs, left behind when switching branches
 lua/.deps/
 lua/lua.wasm
-java/target/
