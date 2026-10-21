@@ -68,10 +68,18 @@ void luaSetScriptResp(lua_State *lua, int resp) {
  * RESP2 output (src/networking.c)
  * ------------------------------------------------------------------------------------------------------------- */
 
+/* Valkey aborts when an allocation fails; here it raises inside luaEvalReply's protected call, so eval poisons the
+ * instance. */
+static void *checkAlloc(lua_State *L, void *p) {
+    if (p == NULL) luaL_error(L, "not enough memory");
+    return p;
+}
+
 static void addReplyProto(respBuf *b, const char *s, size_t len) {
     if (b->len + len > b->cap) {
-        b->cap = (b->len + len) * 2;
-        b->buf = realloc(b->buf, b->cap);
+        size_t cap = (b->len + len) * 2;
+        b->buf = checkAlloc(b->L, realloc(b->buf, cap));
+        b->cap = cap;
     }
     memcpy(b->buf + b->len, s, len);
     b->len += len;
@@ -96,6 +104,7 @@ static void addReplyNull(respBuf *b) {
 /* addReplyErrorFormatInternal with "%s": trims CR/LF at both ends, maps the rest to spaces, then addReplyErrorLength
  * adds "-ERR " unless the text already starts with '-'. Takes ownership of s. */
 static void addReplyError(respBuf *b, char *s) {
+    checkAlloc(b->L, s);
     size_t len = strlen(s), start = 0;
     while (start < len && (s[start] == '\r' || s[start] == '\n')) start++;
     while (len > start && (s[len - 1] == '\r' || s[len - 1] == '\n')) len--;
@@ -108,21 +117,22 @@ static void addReplyError(respBuf *b, char *s) {
     free(s);
 }
 
-static char *lm_asprintf(char const *fmt, ...) {
+static char *lm_asprintf(char const *fmt, ...) { /* NULL if the allocation failed */
     va_list args;
     va_start(args, fmt);
     size_t str_len = vsnprintf(NULL, 0, fmt, args) + 1;
     va_end(args);
     char *str = malloc(str_len);
+    if (str == NULL) return NULL;
     va_start(args, fmt);
     vsnprintf(str, str_len, fmt, args);
     va_end(args);
     return str;
 }
 
-static char *lm_strcpy(const char *str) {
+static char *lm_strcpy(lua_State *lua, const char *str) {
     size_t len = strlen(str);
-    char *res = malloc(len + 1);
+    char *res = checkAlloc(lua, malloc(len + 1));
     memcpy(res, str, len + 1);
     return res;
 }
@@ -194,7 +204,7 @@ static void luaErrorInformationDiscard(errorInfo *err_info) {
 
 static void luaExtractErrorInformation(lua_State *lua, errorInfo *err_info) {
     if (lua_isstring(lua, -1)) {
-        err_info->msg = lm_asprintf("ERR %s", lua_tostring(lua, -1));
+        err_info->msg = checkAlloc(lua, lm_asprintf("ERR %s", lua_tostring(lua, -1)));
         err_info->line = NULL;
         err_info->source = NULL;
         return;
@@ -202,19 +212,19 @@ static void luaExtractErrorInformation(lua_State *lua, errorInfo *err_info) {
 
     lua_getfield(lua, -1, "err");
     if (lua_isstring(lua, -1)) {
-        err_info->msg = lm_strcpy(lua_tostring(lua, -1));
+        err_info->msg = lm_strcpy(lua, lua_tostring(lua, -1));
     }
     lua_pop(lua, 1);
 
     lua_getfield(lua, -1, "source");
     if (lua_isstring(lua, -1)) {
-        err_info->source = lm_strcpy(lua_tostring(lua, -1));
+        err_info->source = lm_strcpy(lua, lua_tostring(lua, -1));
     }
     lua_pop(lua, 1);
 
     lua_getfield(lua, -1, "line");
     if (lua_isstring(lua, -1)) {
-        err_info->line = lm_strcpy(lua_tostring(lua, -1));
+        err_info->line = lm_strcpy(lua, lua_tostring(lua, -1));
     }
     lua_pop(lua, 1);
 
@@ -225,7 +235,7 @@ static void luaExtractErrorInformation(lua_State *lua, errorInfo *err_info) {
 
     if (err_info->msg == NULL) {
         /* Ensure we never return a NULL msg. */
-        err_info->msg = lm_strcpy("ERR unknown error");
+        err_info->msg = lm_strcpy(lua, "ERR unknown error");
     }
 }
 
@@ -233,7 +243,7 @@ static void luaExtractErrorInformation(lua_State *lua, errorInfo *err_info) {
 static char *copy_string_from_lua_stack(lua_State *lua) {
     const char *str = lua_tostring(lua, -1);
     size_t len = lua_strlen(lua, -1);
-    char *res = malloc(len + 1);
+    char *res = checkAlloc(lua, malloc(len + 1));
     strncpy(res, str, len);
     res[len] = 0;
     return res;
@@ -377,7 +387,7 @@ static void luaReplyToServerReply(respBuf *b, int resp_version, lua_State *lua) 
         t = lua_type(lua, -1);
         if (t == LUA_TTABLE) {
             int maplen = 0;
-            respBuf elems = {0};
+            respBuf elems = {.L = lua};
             /* we took care of the stack size on function start */
             lua_pushnil(lua); /* Use nil to start iteration. */
             while (lua_next(lua, -2)) {
@@ -402,7 +412,7 @@ static void luaReplyToServerReply(respBuf *b, int resp_version, lua_State *lua) 
         t = lua_type(lua, -1);
         if (t == LUA_TTABLE) {
             int setlen = 0;
-            respBuf elems = {0};
+            respBuf elems = {.L = lua};
             /* we took care of the stack size on function start */
             lua_pushnil(lua); /* Use nil to start iteration. */
             while (lua_next(lua, -2)) {
@@ -422,7 +432,7 @@ static void luaReplyToServerReply(respBuf *b, int resp_version, lua_State *lua) 
         lua_pop(lua, 1); /* Discard field name pushed before. */
 
         /* Handle the array reply. */
-        respBuf elems = {0};
+        respBuf elems = {.L = lua};
         int j = 1, mbulklen = 0;
         while (1) {
             /* we took care of the stack size on function start */
@@ -508,6 +518,7 @@ static int protectedEvalReply(lua_State *lua) {
 int luaEvalReply(lua_State *lua, int kind, respBuf *out) {
     replyCtx ctx = {kind, out};
     size_t start = out->len;
+    out->L = lua;
     lua_pushcfunction(lua, protectedEvalReply);
     lua_insert(lua, -2);
     lua_pushlightuserdata(lua, &ctx);

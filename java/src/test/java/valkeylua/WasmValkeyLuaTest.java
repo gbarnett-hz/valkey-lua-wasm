@@ -3,6 +3,8 @@ package valkeylua;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -72,6 +74,15 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
         t.join();
         assertInstanceOf(com.dylibso.chicory.wasm.ChicoryException.class, thrown.get());
         assertInstanceOf(IllegalStateException.class, after.get());
+    }
+
+    @Test
+    void replyTooLargeForMemoryCapPoisons() {
+        // A 512 MiB string returned twice: building the reply runs out of Chicory's ~2 GiB memory. Valkey (no cap)
+        // would reply; here the failed allocation must poison the instance, not write through a null pointer.
+        var e = assertTimeoutPreemptively(java.time.Duration.ofSeconds(120), () -> assertThrows(IllegalStateException.class,
+            () -> lua.eval("local s = 'x' for i = 1, 28 do s = s .. s end collectgarbage() return {s, s}")));
+        assertEquals("reply conversion failed", e.getMessage());
     }
 
     @Test

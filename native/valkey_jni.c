@@ -1,5 +1,6 @@
 /* What luajava 4.0.2's natives lack for parity with lua.wasm; called by JniValkeyLua.java. */
 #include <jni.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "fpconv_dtoa.h"
@@ -68,13 +69,17 @@ JNIEXPORT void JNICALL Java_valkeylua_JniValkeyLua_setScriptResp(JNIEnv *env, jc
     luaSetScriptResp((lua_State *)L, resp);
 }
 
-/* Consumes the top of the stack; null if the conversion raised. */
+/* Consumes the top of the stack; null if the conversion raised. A reply that doesn't fit a Java array, or the Java
+ * heap, throws OutOfMemoryError. */
 JNIEXPORT jbyteArray JNICALL Java_valkeylua_JniValkeyLua_evalReply(JNIEnv *env, jclass cls, jlong L, jint kind) {
     respBuf out = {0};
     jbyteArray a = NULL;
     if (luaEvalReply((lua_State *)L, kind, &out) == 0) {
-        a = (*env)->NewByteArray(env, out.len);
-        (*env)->SetByteArrayRegion(env, a, 0, out.len, (const jbyte *)out.buf);
+        if (out.len > INT32_MAX) {
+            (*env)->ThrowNew(env, (*env)->FindClass(env, "java/lang/OutOfMemoryError"), "reply larger than 2 GiB");
+        } else if ((a = (*env)->NewByteArray(env, (jsize)out.len)) != NULL) { /* else OutOfMemoryError is pending */
+            (*env)->SetByteArrayRegion(env, a, 0, (jsize)out.len, (const jbyte *)out.buf);
+        }
     }
     free(out.buf);
     return a;

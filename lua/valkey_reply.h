@@ -6,10 +6,11 @@
 
 #include "lua.h"
 
-/* malloc/realloc-grown; the caller frees buf. */
+/* malloc/realloc-grown; the caller frees buf. L is set by luaEvalReply: a failed allocation raises on it. */
 typedef struct {
     char *buf;
     size_t len, cap;
+    lua_State *L;
 } respBuf;
 
 /* What the value on top of the stack is when luaEvalReply runs. */
