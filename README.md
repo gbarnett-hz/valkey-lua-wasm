@@ -83,9 +83,13 @@ fix for each and its test. `lua.wasm` is wasm32, so `lua_Integer`, `long` and `s
 make every value derived from a Lua integer 64-bit, and the shared tests after the comment "Valkey runs on 64-bit
 hosts" in `ValkeyLuaTest` pin Valkey's values on both backends. What remains:
 
-| Script | Valkey and JNI | Wasm |
-|---|---|---|
-| escape from `eval` (failing `__tostring`) | `IllegalStateException` | Chicory trap (`WasiExitException`) |
+| Deviation | Wasm |
+|---|---|
+| Memory cap | Chicory allows just under 2 GiB, less the 8 MiB C stack. Past it a script gets the Lua error `not enough memory`, which `pcall` can catch; the instance survives. Valkey has no Lua-specific limit. |
+| Memory accounting and GC timing | 32-bit pointers make objects smaller, so `collectgarbage('count')` figures, collector timing and weak-table clearing differ. |
+| `tostring` address width | 32-bit addresses (`table: 0x1e3f0`). Cosmetic. |
+| Minimum thread stack | Evals need at least 512 KiB of JVM thread stack (every default meets it); below that deep nesting poisons the instance. |
+| Escape from `eval` (failing `__tostring`) | Chicory trap (`WasiExitException`) instead of JNI's `IllegalStateException`; both poison the instance. |
 
 Not differences: the `os` library has only `os.clock` in both (Valkey's `loslib.c`), and `tostring` of tables and
 functions prints 64-bit addresses on JNI (cosmetic).

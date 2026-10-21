@@ -64,6 +64,11 @@
             <plugin>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.6.0</version>
+                <configuration>
+                    <!-- WasmValkeyLuaTest.memoryCapIsAnOrdinaryLuaError fills Chicory's ~2 GiB memory. No -Xss: the
+                         suite runs at the JVM's default thread stack. -->
+                    <argLine>-Xmx4g</argLine>
+                </configuration>
             </plugin>
         </plugins>
     </build>

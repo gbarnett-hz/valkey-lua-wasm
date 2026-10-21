@@ -1,11 +1,24 @@
 # Where `lua.wasm` differs from Valkey
 
-Sections 1–6 come from wasm32's 32-bit types; sections 7–8 come from how `lua.wasm` is built and run (C stack size,
-Chicory's memory limit).
+Sections 1–6 come from wasm32's 32-bit types; sections 7–9 come from how `lua.wasm` is built and run (C stack size,
+Chicory's memory limit, pointer size).
 
 **Status:** sections 1–4 and 7 are fixed. `lua/Makefile` applies the patches in `lua/patches/` and two compile switches
-(section 6), so every value derived from a Lua integer is 64-bit, as on Valkey. The "Wasm" columns in those sections
-show the unpatched build, for the record.
+(section 6), so every value derived from a Lua integer is 64-bit, as on Valkey, and links an 8 MiB C stack. The "Wasm"
+columns in those sections show the build before the fix, for the record.
+
+## What remains
+
+These cannot be fixed on wasm32 with Chicory. Each is a deviation from Valkey; this is what a script or an embedder
+observes.
+
+| Deviation | What is observed | Section |
+|---|---|---|
+| Memory cap | Lua heap, C stack and static data share Chicory's 32767 pages (just under 2 GiB, less the 8 MiB stack). A script that needs more gets the ordinary Lua error `not enough memory`; `pcall` can catch it and the instance survives. Valkey has no Lua-specific limit. | 8 |
+| Memory accounting and GC timing | Objects are smaller with 32-bit pointers, so `collectgarbage('count')` returns smaller figures, the incremental collector runs at different points, and weak tables lose entries at different times. | 9 |
+| `tostring` address width | `tostring` of tables, functions and so on prints a 32-bit address (`table: 0x1e3f0`). Cosmetic. | 5 |
+| Minimum thread stack | Evals must run on a JVM thread with at least 512 KiB of stack (every JVM default meets this). Below that, deep nesting overflows the JVM stack and the instance is poisoned. | 7 |
+| Exception when something escapes `eval` | A failing `__tostring` on the result traps in Chicory (`WasiExitException`); JNI throws `IllegalStateException`. Both poison the instance. | — |
 
 Valkey runs on 64-bit hosts (x86_64, arm64), where `ptrdiff_t`, `long`, `unsigned long`, `size_t` and pointers are
 64-bit. `lua.wasm` is built for wasm32, where all of them are 32-bit. Valkey's bundled Lua 5.1 (`deps/lua`) and its
@@ -106,11 +119,10 @@ never runs. Both give `549755813887` and `1099511627776` (probed).
 
 - **Cosmetic (probed):** `tostring` of tables, functions and so on prints a 32-bit address, e.g. `table: 0x1e3f0`
   (14 characters) on wasm against 19 characters on JNI. Scripts should not depend on this.
-- **Memory ceiling (from the types, not probed):** the whole Lua heap, every string length (`size_t`) and the
-  garbage collector's byte counters (`lu_mem`/`l_mem`) fit in wasm32's 4 GiB address space, minus everything else in
-  the instance. Valkey has no such limit, and `maxmemory` does not apply to Lua. On wasm, a script that approaches
-  the limit fails with an out-of-memory error where Valkey would carry on. Chicory's own limit is lower and is
-  reached first; see section 8.
+- **Memory ceiling (from the types):** the whole Lua heap, every string length (`size_t`) and the garbage
+  collector's byte counters (`lu_mem`/`l_mem`) fit in wasm32's 4 GiB address space. Chicory's own limit is lower and
+  is reached first; see section 8. Because every allocation fits under it, a 32-bit `size_t` never truncates a real
+  length.
 
 ## 6. The fix in the Wasm build
 
@@ -209,9 +221,14 @@ and the JVM dies (SIGILL). It passed at 768 KiB, 1 MiB and 2 MiB.
 
 ## 8. Chicory caps the Lua heap just under 2 GiB
 
+Not fixable; pinned by `memoryCapIsAnOrdinaryLuaError` (Wasm-only, because JNI succeeds). It doubles a string by
+concatenation until the cap is hit, which takes about a second; `string.rep` reaches the same error but builds its
+result byte by byte, which took minutes for 1 GiB.
+
 Chicory's `Memory.RUNTIME_MAX_PAGES` is 32767 pages of 64 KiB (backed by a single Java `byte[]`), so a `lua.wasm`
-instance can never use more than 2 GiB − 64 KiB of memory. That covers the whole Lua heap, the C stack and the static
-data. `lua.wasm` starts with 2 pages and declares no maximum, so Chicory's cap is the only one. Valkey has no
+instance can never use more than 2 GiB − 64 KiB of memory. That covers the whole Lua heap, the 8 MiB C stack and the
+static data, so Lua's data gets about 2 GiB − 8 MiB. Chicory grows the `byte[]` by copying it, so the JVM needs
+heap for two copies near the cap (the test suite runs with `-Xmx4g`). `lua.wasm` starts with 2 pages and declares no maximum, so Chicory's cap is the only one. Valkey has no
 Lua-specific limit, and `maxmemory` does not apply to Lua.
 
 All probed:
@@ -233,6 +250,19 @@ What a script sees:
 
 This cannot be fixed in the build. A wasm32 module can address at most 4 GiB, and Chicory does not go past 2 GiB.
 
+## 9. Memory accounting and GC timing
+
+Lua's objects hold pointers, which are 4 bytes on wasm32 and 8 on Valkey's hosts, so the same data takes less memory.
+Probed: 10000 empty tables add 647 KiB to `collectgarbage('count')` on wasm and 959 KiB on JNI.
+
+What a script observes:
+
+- the figures `collectgarbage('count')` returns;
+- when the incremental collector runs, because Lua 5.1 drives it from those byte counts;
+- therefore, when weak tables (`__mode`) lose their entries.
+
+Not fixable on wasm32, and not tested.
+
 ## Tests
 
 `ValkeyLuaTest` runs on both backends (`WasmValkeyLuaTest`, `JniValkeyLuaTest`) and pins 64-bit Valkey's values for
@@ -249,4 +279,5 @@ sections 1–4:
 
 `stringIndicesBeyond32BitsAreNotTruncated` and `structUnpackPositionIs64Bit` passed on the unpatched build too; they
 guard against a partial patch. Section 7: `nestingRaisesValkeysErrors` (shared) and
-`nestingErrorsAtMinimumThreadStack` (Wasm-only, runs on a 512 KiB thread). Section 8 has no test yet.
+`nestingErrorsAtMinimumThreadStack` (Wasm-only, runs on a 512 KiB thread). Section 8:
+`memoryCapIsAnOrdinaryLuaError` (Wasm-only). Sections 5 and 9 are documented, not tested.

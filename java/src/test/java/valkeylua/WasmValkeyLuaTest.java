@@ -38,4 +38,13 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
         for (int i = 0; i < NESTING.length; i++) assertEquals(new ValkeyLua.Result(false, NESTING[i][1]), results.get(i));
         assertEquals(new ValkeyLua.Result(true, "1"), results.get(NESTING.length));
     }
+
+    @Test
+    void memoryCapIsAnOrdinaryLuaError() {
+        // Chicory caps linear memory at 32767 pages; JNI succeeds here, so this is Wasm-only (wasm-difference.md section 8).
+        // Doubling by concatenation (bulk copies) reaches the cap in about a second; string.rep builds byte by byte.
+        assertEquals(new ValkeyLua.Result(false, "not enough memory"),
+            lua.eval("local s = 'x' for i = 1, 31 do s = s .. s end return #s"));
+        assertEquals(new ValkeyLua.Result(true, "1"), lua.eval("return 1"));
+    }
 }
