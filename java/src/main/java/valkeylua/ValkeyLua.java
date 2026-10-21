@@ -1,5 +1,6 @@
 package valkeylua;
 
+import com.dylibso.chicory.compiler.MachineFactoryCompiler;
 import com.dylibso.chicory.runtime.HostFunction;
 import com.dylibso.chicory.runtime.ImportValues;
 import com.dylibso.chicory.runtime.Instance;
@@ -43,7 +44,12 @@ public final class ValkeyLua {
                     return null;
                 });
         var imports = ImportValues.builder().addFunction(wasi.toHostFunctions()).addFunction(redis).build();
-        instance = Instance.builder(Parser.parse(wasm)).withImportValues(imports).withStart(false).build();
+        // Compile lua.wasm to JVM bytecode at instantiation; ~20-40x faster than the default interpreter.
+        instance = Instance.builder(Parser.parse(wasm))
+                .withImportValues(imports)
+                .withMachineFactory(MachineFactoryCompiler::compile)
+                .withStart(false)
+                .build();
         instance.export("_initialize").apply();
     }
 

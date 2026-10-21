@@ -26,6 +26,11 @@
             <version>${chicory.version}</version>
         </dependency>
         <dependency>
+            <groupId>com.dylibso.chicory</groupId>
+            <artifactId>compiler</artifactId>
+            <version>${chicory.version}</version>
+        </dependency>
+        <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
             <version>6.1.3</version>
