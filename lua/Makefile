@@ -11,11 +11,11 @@ CC := $(WASI_SDK)/bin/clang
 LUA_FILES := lapi lauxlib lbaselib lcode ldblib ldebug ldo ldump lfunc lgc llex lmathlib lmem \
 	lobject lopcodes loslib lparser lstate lstring lstrlib ltable ltablib ltm lundump lvm lzio \
 	lua_cjson lua_cmsgpack lua_struct lua_bit strbuf fpconv
-SRCS := $(addprefix $(LUA_SRC)/,$(addsuffix .c,$(LUA_FILES))) valkey_lua.c $(DEPS)/valkey/deps/fpconv/fpconv_dtoa.c
+SRCS := $(addprefix $(LUA_SRC)/,$(addsuffix .c,$(LUA_FILES))) valkey_lua.c $(DEPS)/valkey/deps/fpconv/fpconv_dtoa.c $(DEPS)/valkey/src/sha1.c
 
 # Valkey's LUA_CFLAGS, plus setjmp/longjmp lowered to standard (non-legacy) Wasm EH for Chicory.
 # -Wno-implicit-function-declaration: wasi-libc doesn't declare mkstemp; valkey_lua.c stubs it.
-CFLAGS := -O2 -DLUA_ANSI -DENABLE_CJSON_GLOBAL -DLUA_USE_MKSTEMP -I$(LUA_SRC) -I$(DEPS)/valkey/deps/fpconv \
+CFLAGS := -O2 -DLUA_ANSI -DENABLE_CJSON_GLOBAL -DLUA_USE_MKSTEMP -I$(LUA_SRC) -I$(DEPS)/valkey/deps/fpconv -I$(DEPS)/valkey/src -Icompat \
 	-mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false \
 	-D_WASI_EMULATED_PROCESS_CLOCKS -Wno-implicit-function-declaration
 LDFLAGS := -mexec-model=reactor -lsetjmp -lwasi-emulated-process-clocks
@@ -28,7 +28,7 @@ $(SRCS): | $(LUA_SRC)
 $(LUA_SRC): | $(WASI_SDK)
 	mkdir -p $(DEPS)/valkey
 	curl -sSfL https://github.com/valkey-io/valkey/archive/$(VALKEY_SHA).tar.gz \
-		| tar xz -C $(DEPS)/valkey --strip-components=1 valkey-$(VALKEY_SHA)/deps/lua/src valkey-$(VALKEY_SHA)/deps/fpconv valkey-$(VALKEY_SHA)/src/solarisfixes.h
+		| tar xz -C $(DEPS)/valkey --strip-components=1 valkey-$(VALKEY_SHA)/deps/lua/src valkey-$(VALKEY_SHA)/deps/fpconv valkey-$(VALKEY_SHA)/src/solarisfixes.h valkey-$(VALKEY_SHA)/src/sha1.c valkey-$(VALKEY_SHA)/src/sha1.h
 
 $(WASI_SDK):
 	mkdir -p $@

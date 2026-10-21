@@ -10,6 +10,7 @@
 #include "lualib.h"
 
 #include "fpconv_dtoa.h"
+#include "sha1.h"
 
 LUALIB_API int(luaopen_cjson)(lua_State *L);
 LUALIB_API int(luaopen_struct)(lua_State *L);
@@ -474,6 +475,130 @@ static int luaRedisPcall(lua_State *lua) {
 static int redisCall(lua_State *L) { return redisGenericCommand(L, 1); }
 static int redisPCall(lua_State *L) { return redisGenericCommand(L, 0); }
 
+/* Port of sha1hex from script_lua.c. digest must hold 41 bytes. */
+static void sha1hex(char *digest, char *script, size_t len) {
+    SHA1_CTX ctx;
+    unsigned char hash[20];
+    char *cset = "0123456789abcdef";
+    int j;
+
+    SHA1Init(&ctx);
+    SHA1Update(&ctx, (unsigned char *)script, len);
+    SHA1Final(hash, &ctx);
+
+    for (j = 0; j < 20; j++) {
+        digest[j * 2] = cset[((hash[j] & 0xF0) >> 4)];
+        digest[j * 2 + 1] = cset[(hash[j] & 0xF)];
+    }
+    digest[40] = '\0';
+}
+
+static int luaRedisSha1hexCommand(lua_State *lua) {
+    int argc = lua_gettop(lua);
+    char digest[41];
+    size_t len;
+    char *s;
+
+    if (argc != 1) {
+        luaPushError(lua, "wrong number of arguments");
+        return lua_error(lua);
+    }
+
+    s = (char *)lua_tolstring(lua, 1, &len);
+    sha1hex(digest, s, len);
+    lua_pushstring(lua, digest);
+    return 1;
+}
+
+static int luaRedisReturnSingleFieldTable(lua_State *lua, char *field) {
+    if (lua_gettop(lua) != 1 || lua_type(lua, -1) != LUA_TSTRING) {
+        luaPushError(lua, "wrong number or type of arguments");
+        return 1;
+    }
+
+    lua_newtable(lua);
+    lua_pushstring(lua, field);
+    lua_pushvalue(lua, -3);
+    lua_settable(lua, -3);
+    return 1;
+}
+
+static int luaRedisErrorReplyCommand(lua_State *lua) {
+    if (lua_gettop(lua) != 1 || lua_type(lua, -1) != LUA_TSTRING) {
+        luaPushError(lua, "wrong number or type of arguments");
+        return 1;
+    }
+
+    /* add '-' if not exists */
+    const char *err = lua_tostring(lua, -1);
+    char *err_buff = NULL;
+    if (err[0] != '-') {
+        err_buff = lm_asprintf("-%s", err);
+    } else {
+        err_buff = lm_strcpy(err);
+    }
+    luaPushErrorBuff(lua, err_buff);
+    free(err_buff);
+    return 1;
+}
+
+static int luaRedisStatusReplyCommand(lua_State *lua) {
+    return luaRedisReturnSingleFieldTable(lua, "ok");
+}
+
+/* No debugger here, so these take the "not active" branches of the upstream functions. */
+static int luaServerDebugCommand(lua_State *lua) {
+    (void)lua;
+    return 0;
+}
+
+static int luaServerBreakpointCommand(lua_State *lua) {
+    lua_pushboolean(lua, 0);
+    return 1;
+}
+
+static int luaServerReplicateCommandsCommand(lua_State *lua) {
+    lua_pushboolean(lua, 1);
+    return 1;
+}
+
+static uint32_t parse_semver(const char *version) {
+    unsigned int major = 0, minor = 0, patch = 0;
+    sscanf(version, "%u.%u.%u", &major, &minor, &patch);
+    return ((major & 0xFF) << 16) | ((minor & 0xFF) << 8) | (patch & 0xFF);
+}
+
+/* Fixed per instance; set once by set_server_info. */
+static char *redis_version = "", *valkey_version = "", *server_name = "";
+
+/* req is a RESP2 array of bulk strings: [redisVersion, valkeyVersion, serverName]. */
+__attribute__((export_name("set_server_info"))) void set_server_info(const char *req, size_t len) {
+    const char *p = req, *end = req + len;
+    char **fields[3] = {&redis_version, &valkey_version, &server_name};
+    while (p < end && *p++ != '\n'); /* skip "*3\r\n" */
+    for (int i = 0; i < 3 && p < end; i++) {
+        long n = strtol(p + 1, NULL, 10); /* "$<n>\r\n" */
+        while (p < end && *p++ != '\n');
+        *fields[i] = memcpy(calloc(n + 1, 1), p, n);
+        p += n + 2;
+    }
+}
+
+static void setField(lua_State *L, const char *name, lua_CFunction f) {
+    lua_pushcfunction(L, f);
+    lua_setfield(L, -2, name);
+}
+
+static void setNumber(lua_State *L, const char *name, lua_Number n) {
+    lua_pushnumber(L, n);
+    lua_setfield(L, -2, name);
+}
+
+static void setString(lua_State *L, const char *name, const char *s) {
+    lua_pushstring(L, s);
+    lua_setfield(L, -2, name);
+}
+
 static char *result;
 static size_t result_size;
 
@@ -503,6 +628,26 @@ __attribute__((export_name("eval"))) int eval(const char *src, size_t len) {
     lua_setfield(L, -2, "call");
     lua_pushcfunction(L, redisPCall);
     lua_setfield(L, -2, "pcall");
+    setField(L, "sha1hex", luaRedisSha1hexCommand);
+    setField(L, "error_reply", luaRedisErrorReplyCommand);
+    setField(L, "status_reply", luaRedisStatusReplyCommand);
+    setField(L, "replicate_commands", luaServerReplicateCommandsCommand);
+    setField(L, "breakpoint", luaServerBreakpointCommand);
+    setField(L, "debug", luaServerDebugCommand);
+    setNumber(L, "REPL_NONE", 0);
+    setNumber(L, "REPL_AOF", 1);
+    setNumber(L, "REPL_SLAVE", 2);
+    setNumber(L, "REPL_REPLICA", 2);
+    setNumber(L, "REPL_ALL", 3);
+    setNumber(L, "LOG_DEBUG", 0);
+    setNumber(L, "LOG_VERBOSE", 1);
+    setNumber(L, "LOG_NOTICE", 2);
+    setNumber(L, "LOG_WARNING", 3);
+    setNumber(L, "REDIS_VERSION_NUM", parse_semver(redis_version));
+    setString(L, "REDIS_VERSION", redis_version);
+    setNumber(L, "VALKEY_VERSION_NUM", parse_semver(valkey_version));
+    setString(L, "VALKEY_VERSION", valkey_version);
+    setString(L, "SERVER_NAME", server_name);
     lua_pushvalue(L, -1);
     lua_setglobal(L, "server");
     lua_setglobal(L, "redis");

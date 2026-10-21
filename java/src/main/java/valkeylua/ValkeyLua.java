@@ -27,6 +27,10 @@ public final class ValkeyLua {
     private static final int OP_CALL = 0, OP_SETRESP = 1, OP_SET_REPL = 2, OP_LOG = 3, OP_ACL_CHECK_CMD = 4;
 
     public ValkeyLua(Path wasm, Handler handler) {
+        this(wasm, handler, ServerInfo.DEFAULT);
+    }
+
+    public ValkeyLua(Path wasm, Handler handler, ServerInfo info) {
         var wasi = WasiPreview1.builder().withOptions(WasiOptions.builder().build()).build();
         var redis = new HostFunction("env", "host_call",
                 FunctionType.of(List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of()),
@@ -57,6 +61,22 @@ public final class ValkeyLua {
                 .withStart(false)
                 .build();
         instance.export("_initialize").apply();
+        setServerInfo(info);
+    }
+
+    private void setServerInfo(ServerInfo info) {
+        var req = new StringBuilder("*3\r\n");
+        for (String f : List.of(info.redisVersion(), info.valkeyVersion(), info.serverName())) {
+            req.append('$').append(f.getBytes(StandardCharsets.UTF_8).length).append("\r\n").append(f).append("\r\n");
+        }
+        byte[] b = req.toString().getBytes(StandardCharsets.UTF_8);
+        int ptr = (int) instance.export("alloc").apply(b.length)[0];
+        try {
+            instance.memory().write(ptr, b);
+            instance.export("set_server_info").apply(ptr, b.length);
+        } finally {
+            instance.export("dealloc").apply(ptr);
+        }
     }
 
     public Result eval(String script) {

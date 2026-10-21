@@ -213,4 +213,40 @@ class ValkeyLuaTest {
         var l = new ValkeyLua(WASM, args -> { throw new NullPointerException(); });
         assertEquals("ERR NullPointerException", okOn(l, "return redis.pcall('GET', 'k').err"));
     }
+
+    @Test
+    void sha1hex() {
+        assertEquals("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d", ok("return redis.sha1hex('hello')"));
+        assertEquals("da39a3ee5e6b4b0d3255bfef95601890afd80709", ok("return redis.sha1hex('')"));
+        assertEquals("ERR wrong number of arguments", lua.eval("return redis.sha1hex()").value());
+    }
+
+    @Test
+    void errorAndStatusReply() {
+        assertEquals("ERR x", ok("return redis.error_reply('ERR x').err"));
+        assertEquals("ERR x", ok("return redis.error_reply('-ERR x').err"));
+        assertEquals("FINE", ok("return redis.status_reply('FINE').ok"));
+        // Valkey quirk: bad arguments return an error table instead of raising.
+        assertEquals("ERR wrong number or type of arguments", ok("return redis.error_reply(1).err"));
+        assertEquals("ERR wrong number or type of arguments", ok("return redis.status_reply().err"));
+    }
+
+    @Test
+    void debuggerStubsAndReplicateCommands() {
+        assertEquals("false", ok("return tostring(redis.breakpoint())"));
+        assertEquals("0", ok("return select('#', redis.debug('x', 1))"));
+        assertEquals("true", ok("return tostring(redis.replicate_commands())"));
+    }
+
+    @Test
+    void constants() {
+        assertEquals("0 1 2 2 3", ok("return redis.REPL_NONE..' '..redis.REPL_AOF..' '..redis.REPL_SLAVE..' '..redis.REPL_REPLICA..' '..redis.REPL_ALL"));
+        assertEquals("0 1 2 3", ok("return redis.LOG_DEBUG..' '..redis.LOG_VERBOSE..' '..redis.LOG_NOTICE..' '..redis.LOG_WARNING"));
+        assertEquals("7.2.4 459268 255.255.255 16777215 valkey", ok(
+            "return redis.REDIS_VERSION..' '..redis.REDIS_VERSION_NUM..' '..redis.VALKEY_VERSION..' '..redis.VALKEY_VERSION_NUM..' '..redis.SERVER_NAME"));
+        var custom = new ValkeyLua(WASM, args -> "+OK\r\n".getBytes(StandardCharsets.UTF_8),
+                new ServerInfo("7.0.1", "8.1.0", "acme"));
+        assertEquals("7.0.1 458753 8.1.0 524544 acme", okOn(custom,
+            "return redis.REDIS_VERSION..' '..redis.REDIS_VERSION_NUM..' '..redis.VALKEY_VERSION..' '..redis.VALKEY_VERSION_NUM..' '..redis.SERVER_NAME"));
+    }
 }
