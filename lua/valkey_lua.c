@@ -562,6 +562,138 @@ static int luaServerReplicateCommandsCommand(lua_State *lua) {
     return 1;
 }
 
+/* Validates and consumes (frees) a non-call reply. An error reply is raised as a Lua error; with want '+' the
+ * reply must be exactly +OK, with ':' exactly :0 or :1 (returned). Anything else raises "unexpected reply". */
+static int expectReply(lua_State *L, char *reply, size_t len, const char *fn, char want) {
+    int value = -1;
+    if (len > 0 && reply[0] == '-') {
+        char *err = lm_asprintf("%.*s", (int)len, reply);
+        free(reply);
+        luaPushErrorBuff(L, err);
+        free(err);
+        return lua_error(L);
+    }
+    if (want == '+' && len == 5 && memcmp(reply, "+OK\r\n", 5) == 0) value = 1;
+    else if (want == ':' && len == 4 && memcmp(reply, ":", 1) == 0 && (reply[1] == '0' || reply[1] == '1') &&
+             memcmp(reply + 2, "\r\n", 2) == 0) value = reply[1] - '0';
+    free(reply);
+    if (value < 0) {
+        char *msg = lm_asprintf("unexpected reply from handler for %s", fn);
+        luaPushError(L, msg);
+        free(msg);
+        return lua_error(L);
+    }
+    return value;
+}
+
+/* Sends [v] to the handler and expects +OK. */
+static void hostCallInt(lua_State *L, int op, int v, const char *fn) {
+    char num[16], req[48];
+    int n = snprintf(num, sizeof(num), "%d", v);
+    int req_len = snprintf(req, sizeof(req), "*1\r\n$%d\r\n%s\r\n", n, num);
+    size_t reply_len;
+    char *reply = hostCall(op, req, req_len, &reply_len);
+    expectReply(L, reply, reply_len, fn, '+');
+}
+
+static int luaSetResp(lua_State *lua) {
+    int argc = lua_gettop(lua);
+    if (argc != 1) {
+        luaPushError(lua, "server.setresp() requires one argument.");
+        return lua_error(lua);
+    }
+    int resp = lua_tonumber(lua, -argc);
+    if (resp != 2 && resp != 3) {
+        luaPushError(lua, "RESP version must be 2 or 3.");
+        return lua_error(lua);
+    }
+    hostCallInt(lua, OP_SETRESP, resp, "server.setresp");
+    return 0;
+}
+
+static int luaRedisSetReplCommand(lua_State *lua) {
+    int flags, argc = lua_gettop(lua);
+    if (argc != 1) {
+        luaPushError(lua, "server.set_repl() requires one argument.");
+        return lua_error(lua);
+    }
+    flags = lua_tonumber(lua, -1);
+    if ((flags & ~3) != 0) {
+        luaPushError(lua, "Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.");
+        return lua_error(lua);
+    }
+    hostCallInt(lua, OP_SET_REPL, flags, "server.set_repl");
+    return 0;
+}
+
+static int luaLogCommand(lua_State *lua) {
+    int j, argc = lua_gettop(lua);
+    int level;
+
+    if (argc < 2) {
+        luaPushError(lua, "server.log() requires two arguments or more.");
+        return lua_error(lua);
+    } else if (!lua_isnumber(lua, -argc)) {
+        luaPushError(lua, "First argument must be a number (log level).");
+        return lua_error(lua);
+    }
+    level = lua_tonumber(lua, -argc);
+    if (level < 0 || level > 3) {
+        luaPushError(lua, "Invalid log level.");
+        return lua_error(lua);
+    }
+
+    /* Glue together all the arguments (non-string ones are skipped, as in Valkey). */
+    luaL_Buffer msg;
+    luaL_buffinit(lua, &msg);
+    for (j = 1; j < argc; j++) {
+        size_t len;
+        const char *s = lua_tolstring(lua, j + 1, &len);
+        if (s) {
+            if (j != 1) luaL_addchar(&msg, ' ');
+            luaL_addlstring(&msg, s, len);
+        }
+    }
+    luaL_pushresult(&msg);
+    size_t msg_len;
+    const char *m = lua_tolstring(lua, -1, &msg_len);
+
+    /* [level, message] */
+    char hdr[48];
+    luaL_Buffer b;
+    luaL_buffinit(lua, &b);
+    luaL_addlstring(&b, hdr, snprintf(hdr, sizeof(hdr), "*2\r\n$1\r\n%d\r\n$%zu\r\n", level, msg_len));
+    luaL_addlstring(&b, m, msg_len);
+    luaL_addlstring(&b, "\r\n", 2);
+    luaL_pushresult(&b);
+
+    size_t req_len, reply_len;
+    const char *req = lua_tolstring(lua, -1, &req_len);
+    char *reply = hostCall(OP_LOG, req, req_len, &reply_len);
+    expectReply(lua, reply, reply_len, "server.log", '+');
+    return 0;
+}
+
+static int luaRedisAclCheckCmdPermissionsCommand(lua_State *lua) {
+    luaL_Buffer b;
+    luaL_buffinit(lua, &b);
+    if (!luaArgsToRequest(lua, &b)) return lua_error(lua);
+    luaL_pushresult(&b);
+
+    size_t req_len, reply_len;
+    const char *req = lua_tolstring(lua, -1, &req_len);
+    char *reply = hostCall(OP_ACL_CHECK_CMD, req, req_len, &reply_len);
+    lua_pushboolean(lua, expectReply(lua, reply, reply_len, "server.acl_check_cmd", ':'));
+    return 1;
+}
+
+/* Per-eval reset: RESP2 and replicate to AOF and replicas. Run protected so a failure becomes the eval error. */
+static int resetHostState(lua_State *L) {
+    hostCallInt(L, OP_SETRESP, 2, "server.setresp");
+    hostCallInt(L, OP_SET_REPL, 3, "server.set_repl");
+    return 0;
+}
+
 static uint32_t parse_semver(const char *version) {
     unsigned int major = 0, minor = 0, patch = 0;
     sscanf(version, "%u.%u.%u", &major, &minor, &patch);
@@ -634,6 +766,10 @@ __attribute__((export_name("eval"))) int eval(const char *src, size_t len) {
     setField(L, "replicate_commands", luaServerReplicateCommandsCommand);
     setField(L, "breakpoint", luaServerBreakpointCommand);
     setField(L, "debug", luaServerDebugCommand);
+    setField(L, "setresp", luaSetResp);
+    setField(L, "set_repl", luaRedisSetReplCommand);
+    setField(L, "log", luaLogCommand);
+    setField(L, "acl_check_cmd", luaRedisAclCheckCmdPermissionsCommand);
     setNumber(L, "REPL_NONE", 0);
     setNumber(L, "REPL_AOF", 1);
     setNumber(L, "REPL_SLAVE", 2);
@@ -654,7 +790,8 @@ __attribute__((export_name("eval"))) int eval(const char *src, size_t len) {
     lua_pushcfunction(L, luaRedisPcall);
     lua_setglobal(L, "pcall");
 
-    int status = luaL_loadbuffer(L, src, len, "@user_script") || lua_pcall(L, 0, 1, 0);
+    lua_pushcfunction(L, resetHostState);
+    int status = lua_pcall(L, 0, 0, 0) || luaL_loadbuffer(L, src, len, "@user_script") || lua_pcall(L, 0, 1, 0);
 
     /* Errors raised as {err=...} tables (e.g. by redis.call) report their message. */
     if (status && lua_istable(L, -1)) {

@@ -249,4 +249,118 @@ class ValkeyLuaTest {
         assertEquals("7.0.1 458753 8.1.0 524544 acme", okOn(custom,
             "return redis.REDIS_VERSION..' '..redis.REDIS_VERSION_NUM..' '..redis.VALKEY_VERSION..' '..redis.VALKEY_VERSION_NUM..' '..redis.SERVER_NAME"));
     }
+
+    /** Records every handler call as a string and answers each op with a settable reply. */
+    static class RecordingHandler implements Handler {
+        final List<String> ops = new ArrayList<>();
+        String setRespReply, setReplReply, logReply, aclReply;
+
+        private static String str(List<byte[]> args) {
+            return String.join(" ", args.stream().map(a -> new String(a, StandardCharsets.UTF_8)).toList());
+        }
+
+        private static byte[] or(String reply, byte[] dflt) {
+            return reply == null ? dflt : reply.getBytes(StandardCharsets.UTF_8);
+        }
+
+        @Override public byte[] call(List<byte[]> args) {
+            ops.add("call " + str(args));
+            return "+OK\r\n".getBytes(StandardCharsets.UTF_8);
+        }
+
+        @Override public byte[] setResp(int v) {
+            ops.add("setResp " + v);
+            return or(setRespReply, Handler.super.setResp(v));
+        }
+
+        @Override public byte[] setRepl(int f) {
+            ops.add("setRepl " + f);
+            return or(setReplReply, Handler.super.setRepl(f));
+        }
+
+        @Override public byte[] log(int level, String m) {
+            ops.add("log " + level + " " + m);
+            return or(logReply, Handler.super.log(level, m));
+        }
+
+        @Override public byte[] aclCheckCmd(List<byte[]> args) {
+            ops.add("acl " + str(args));
+            return or(aclReply, Handler.super.aclCheckCmd(args));
+        }
+    }
+
+    @Test
+    void perEvalResetPrecedesScript() {
+        var h = new RecordingHandler();
+        okOn(new ValkeyLua(WASM, h), "return redis.call('GET', 'k')");
+        assertEquals(List.of("setResp 2", "setRepl 3", "call GET k"), h.ops);
+    }
+
+    @Test
+    void resetErrorFailsEvalWithoutRunningScript() {
+        var h = new RecordingHandler();
+        h.setReplReply = "-ERR no replication here\r\n";
+        var r = new ValkeyLua(WASM, h).eval("return redis.call('GET', 'k')");
+        assertEquals(false, r.ok());
+        assertEquals("ERR no replication here", r.value());
+        assertEquals(List.of("setResp 2", "setRepl 3"), h.ops);
+    }
+
+    @Test
+    void resetRunsEvenAfterFailedEval() {
+        var h = new RecordingHandler();
+        var l = new ValkeyLua(WASM, h);
+        l.eval("redis.set_repl(redis.REPL_NONE) error('boom')");
+        h.ops.clear();
+        okOn(l, "return 1");
+        assertEquals(List.of("setResp 2", "setRepl 3"), h.ops);
+    }
+
+    @Test
+    void setresp() {
+        var h = new RecordingHandler();
+        var l = new ValkeyLua(WASM, h);
+        assertEquals("0", okOn(l, "return select('#', redis.setresp(2))"));
+        assertEquals("ERR RESP3 is not supported", l.eval("redis.setresp(3)").value());
+        assertEquals("ERR RESP version must be 2 or 3.", l.eval("redis.setresp(4)").value());
+        assertEquals("ERR server.setresp() requires one argument.", l.eval("redis.setresp()").value());
+        h.setRespReply = ":1\r\n"; // now the per-eval reset itself fails, with the same message
+        assertEquals("ERR unexpected reply from handler for server.setresp", l.eval("redis.setresp(2)").value());
+    }
+
+    @Test
+    void setRepl() {
+        var h = new RecordingHandler();
+        var l = new ValkeyLua(WASM, h);
+        okOn(l, "redis.set_repl(redis.REPL_AOF) return 1");
+        assertTrue(h.ops.contains("setRepl 1"), h.ops.toString());
+        assertEquals("ERR Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.",
+            l.eval("redis.set_repl(8)").value());
+        assertEquals("ERR server.set_repl() requires one argument.", l.eval("redis.set_repl()").value());
+    }
+
+    @Test
+    void log() {
+        var h = new RecordingHandler();
+        var l = new ValkeyLua(WASM, h);
+        okOn(l, "redis.log(redis.LOG_NOTICE, 'a', 'b', 3) return 1");
+        assertTrue(h.ops.contains("log 2 a b 3"), h.ops.toString());
+        assertEquals("ERR server.log() requires two arguments or more.", l.eval("redis.log(1)").value());
+        assertEquals("ERR First argument must be a number (log level).", l.eval("redis.log('x', 'y')").value());
+        assertEquals("ERR Invalid log level.", l.eval("redis.log(9, 'y')").value());
+    }
+
+    @Test
+    void aclCheckCmd() {
+        var h = new RecordingHandler();
+        var l = new ValkeyLua(WASM, h);
+        assertEquals("true", okOn(l, "return tostring(redis.acl_check_cmd('GET', 'k'))"));
+        h.aclReply = ":0\r\n";
+        assertEquals("false", okOn(l, "return tostring(redis.acl_check_cmd('GET', 'k'))"));
+        h.aclReply = "-ERR Invalid command passed to server.acl_check_cmd()\r\n";
+        assertEquals("ERR Invalid command passed to server.acl_check_cmd()", l.eval("redis.acl_check_cmd('NOPE')").value());
+        h.aclReply = "+OK\r\n";
+        assertEquals("ERR unexpected reply from handler for server.acl_check_cmd", l.eval("redis.acl_check_cmd('GET')").value());
+        assertEquals("ERR Please specify at least one argument for this call", l.eval("redis.acl_check_cmd()").value());
+    }
 }
