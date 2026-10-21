@@ -50,6 +50,18 @@ public final class JniValkeyLua extends ValkeyLua {
 
     private static native void enableReadonlyGlobals(long L, boolean enabled);
 
+    // EVAL's error handler and reply (lua/valkey_reply.c); kinds as its enum.
+    private static native void installErrorHandler(long L);
+
+    private static native void pushErrorHandler(long L);
+
+    private static native void setScriptResp(long L, int resp);
+
+    /** Consumes the top of the stack; null if the conversion raised. */
+    private static native byte[] evalReply(long L, int kind);
+
+    private static final int EVAL_OK = 0, EVAL_SETUP = 1, EVAL_COMPILE = 2, EVAL_RUN = 3;
+
     private static final int MAX_NESTED_COLLECTIONS_DEPTH = 256;
     private static final byte[] OK = "+OK\r\n".getBytes(StandardCharsets.US_ASCII);
 
@@ -315,7 +327,9 @@ public final class JniValkeyLua extends ValkeyLua {
             luaPushError(L, "RESP version must be 2 or 3.");
             return -1;
         }
-        return expectReply(L, host(() -> handler.setResp(resp)), "server.setresp", '+') < 0 ? -1 : 0;
+        if (expectReply(L, host(() -> handler.setResp(resp)), "server.setresp", '+') < 0) return -1;
+        setScriptResp(L, resp);
+        return 0;
     }
 
     private int luaRedisSetReplCommand(Lua l) {
@@ -466,7 +480,7 @@ public final class JniValkeyLua extends ValkeyLua {
         if (kv.length == 0 || kv[0] != '*' || pushReply(L, kv, 0, error, 0) != kv.length || error[0]
                 || C.lua_type(L, -1) != LUA_TTABLE || C.lua_objlen(L, -1) != 2) {
             C.lua_settop(L, 0);
-            C.lua_pushstring(L, "malformed KEYS/ARGV buffer");
+            C.lua_pushstring(L, "ERR malformed KEYS/ARGV buffer");
             return 1;
         }
         // open global protection to set KEYS and ARGV
@@ -480,10 +494,7 @@ public final class JniValkeyLua extends ValkeyLua {
         return 0;
     }
 
-    /**
-     * Runs a script in a fresh state, as the Wasm variant does. The first return value (or the error message) is
-     * converted with tostring().
-     */
+    /** Runs a script in a fresh state, as the Wasm variant does, and returns Valkey's RESP2 reply. */
     @Override
     Result evalUnchecked(String script, byte[] kv) {
         var lua = new Lua51();
@@ -545,30 +556,25 @@ public final class JniValkeyLua extends ValkeyLua {
             setField(L, "random", this::serverMathRandom);
             setField(L, "randomseed", this::serverMathRandomseed);
             C.lua_setglobal(L, "math");
+            installErrorHandler(L);
             lockGlobals(L);
 
             byte[] src = script.getBytes(StandardCharsets.UTF_8);
+            int kind = EVAL_SETUP;
             C.luaJ_pushfunction(L, (JFunction) this::resetHostState);
-            int status = C.lua_pcall(L, 0, 0, 0);
-            if (status == 0) status = setKeysArgv(L, kv);
-            if (status == 0) status = C.luaJ_loadbuffer(L, ByteBuffer.allocateDirect(src.length).put(src), src.length, "@user_script");
-            if (status == 0) status = C.lua_pcall(L, 0, 1, 0);
-
-            // Errors raised as {err=...} tables (e.g. by redis.call) report their message.
-            if (status != 0 && C.lua_type(L, -1) == LUA_TTABLE) {
-                C.lua_getfield(L, -1, "err");
-                if (C.lua_isstring(L, -1) != 0) C.lua_replace(L, -2);
-                else C.lua_pop(L, 1);
+            if (C.lua_pcall(L, 0, 0, 0) == 0 && setKeysArgv(L, kv) == 0) {
+                kind = EVAL_COMPILE;
+                if (C.luaJ_loadbuffer(L, ByteBuffer.allocateDirect(src.length).put(src), src.length, "@user_script") == 0) {
+                    pushErrorHandler(L);
+                    C.lua_insert(L, -2);
+                    kind = C.lua_pcall(L, 0, 1, -2) != 0 ? EVAL_RUN : EVAL_OK;
+                    C.lua_remove(L, -2); // the error handler
+                }
             }
 
-            C.lua_getglobal(L, "tostring");
-            C.lua_insert(L, -2);
-            // lua.wasm uses lua_call. Unprotected, a failing __tostring would reach luajava's panic handler, which
-            // aborts the JVM; thrown, it poisons this instance like the trap it causes in lua.wasm.
-            if (C.lua_pcall(L, 1, 1, 0) != 0) {
-                throw new IllegalStateException("tostring failed: " + latin1(toBytes(L, -1)));
-            }
-            return new Result(status == 0, new String(toBytes(L, -1), StandardCharsets.UTF_8));
+            byte[] reply = evalReply(L, kind);
+            if (reply == null) throw new IllegalStateException("reply conversion failed");
+            return new Result(kind == EVAL_OK, reply);
         } finally {
             lua.close();
         }

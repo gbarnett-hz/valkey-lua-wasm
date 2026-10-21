@@ -166,7 +166,7 @@ exists is the handler's job.
 **Per-eval reset.** At the start of every `eval`, before the script runs, `ValkeyLua` calls `setResp(2)` then
 `setRepl(REPL_ALL)` (3), as Valkey resets `resp` and the replication flags on each run. A handler
 that logs or counts calls sees these on every `eval`, even if the script never calls `setresp`/`set_repl`. If either
-returns an error reply, `eval` returns `Result(ok=false, <err>)` without running the script.
+returns an error reply, `eval` returns `Result(ok=false, -<err>)` without running the script (no `script: on ...` suffix).
 
 Worked example (this is the `readmeExample` test in `ValkeyLuaTest`):
 
@@ -187,7 +187,7 @@ Handler handler = args -> {
 };
 var vl = new JniValkeyLua(handler);   // or new WasmValkeyLua(Path.of("lua/lua.wasm"), handler)
 var r = vl.eval("redis.call('SET', KEYS[1], ARGV[1]); return redis.call('GET', KEYS[1])",
-        List.of("k".getBytes()), List.of("v".getBytes()));   // Result[ok=true, value=v]
+        List.of("k".getBytes()), List.of("v".getBytes()));   // Result[ok=true, reply=$1\r\nv\r\n]
 ```
 
 ## Reply contract
@@ -268,11 +268,13 @@ exception, never a silently wrong value. An error reply is never "wrong type": i
 6. **`ValkeyLua` catches anything a handler throws** (any `Throwable`, including `Error`s such as
    `StackOverflowError`) and turns it into `-ERR <message>` (CR/LF become spaces; the class's simple name if there is
    no message), so a buggy mapping becomes a script error instead of unwinding past Lua. A handler returning `null`
-   becomes `-ERR handler returned null`. If anything still escapes `eval` (e.g. a failing `__tostring` on the
-   result, or Chicory's own call-stack limit), that `eval` rethrows and the instance is poisoned: every later `eval` throws
+   becomes `-ERR handler returned null`. If anything still escapes `eval` (e.g. a raising `__index` on an
+   error table while the reply is built, or Chicory's own call-stack limit), that `eval` rethrows and the instance is poisoned: every later `eval` throws
    `IllegalStateException`; create a new `ValkeyLua`.
-7. Uncaught Lua errors end `eval` with `Result(ok=false, message)`, where message is the error table's `err`
-   field (current behaviour, unchanged).
+7. `eval` returns `Result(ok, reply)`: `reply` is the RESP2 reply Valkey would send the client, for success and
+   failure. An uncaught error gives `ok=false` and Valkey's error reply, e.g. `error('x')` gives
+   `-ERR user_script:1: x script: on @user_script:1.`; a script that *returns* `{err=...}` gives `ok=true` and an
+   error reply, as the client can't tell them apart on Valkey either.
 
 ## Divergences from Valkey
 

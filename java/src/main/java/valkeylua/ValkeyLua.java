@@ -2,6 +2,7 @@ package valkeylua;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Supplier;
@@ -12,7 +13,27 @@ import java.util.function.Supplier;
  */
 public abstract sealed class ValkeyLua permits WasmValkeyLua, JniValkeyLua {
 
-    public record Result(boolean ok, String value) {}
+    /**
+     * reply is the RESP2 reply Valkey would send the client. ok is false when the script raised, failed to compile, or
+     * the per-eval setup failed; a script that returns {err=...} gets ok=true with an error reply, as on Valkey.
+     */
+    public record Result(boolean ok, byte[] reply) {
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Result r && ok == r.ok && Arrays.equals(reply, r.reply);
+        }
+
+        @Override
+        public int hashCode() {
+            return Boolean.hashCode(ok) * 31 + Arrays.hashCode(reply);
+        }
+
+        @Override
+        public String toString() {
+            String text = new String(reply, StandardCharsets.ISO_8859_1).replace("\r", "\\r").replace("\n", "\\n");
+            return "Result[ok=" + ok + ", reply=" + text + "]";
+        }
+    }
 
     // Set once anything escapes eval; the backend's state can no longer be trusted.
     private boolean poisoned;

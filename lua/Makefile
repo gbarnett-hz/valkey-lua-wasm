@@ -14,7 +14,7 @@ CC := $(WASI_SDK)/bin/clang
 LUA_FILES := lapi lauxlib lbaselib lcode ldblib ldebug ldo ldump lfunc lgc llex lmathlib lmem \
 	lobject lopcodes loslib lparser lstate lstring lstrlib ltable ltablib ltm lundump lvm lzio \
 	lua_cjson lua_cmsgpack lua_struct lua_bit strbuf fpconv
-SRCS := $(addprefix $(LUA_SRC)/,$(addsuffix .c,$(LUA_FILES))) valkey_lua.c valkey_globals.c $(DEPS)/valkey/deps/fpconv/fpconv_dtoa.c $(DEPS)/valkey/src/sha1.c $(DEPS)/valkey/src/rand.c
+SRCS := $(addprefix $(LUA_SRC)/,$(addsuffix .c,$(LUA_FILES))) valkey_lua.c valkey_globals.c valkey_reply.c $(DEPS)/valkey/deps/fpconv/fpconv_dtoa.c $(DEPS)/valkey/src/sha1.c $(DEPS)/valkey/src/rand.c
 
 # Valkey's LUA_CFLAGS, plus setjmp/longjmp lowered to standard (non-legacy) Wasm EH for Chicory.
 # LUA_USELONGLONG and STRUCT_INT, with patches/, make every value derived from a Lua integer 64-bit, as on Valkey's
@@ -27,7 +27,7 @@ CFLAGS := -O2 -DLUA_ANSI -DENABLE_CJSON_GLOBAL -DLUA_USE_MKSTEMP -DLUA_USELONGLO
 # (the default) keeps an overflow a trap. See wasm-difference.md section 7.
 LDFLAGS := -mexec-model=reactor -lsetjmp -lwasi-emulated-process-clocks -Wl,-z,stack-size=8388608
 
-lua.wasm: $(SRCS) $(STAMP) Makefile
+lua.wasm: $(SRCS) valkey_reply.h $(STAMP) Makefile
 	$(CC) $(CFLAGS) $(SRCS) $(LDFLAGS) -o $@
 
 $(SRCS): | $(STAMP)

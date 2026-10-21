@@ -26,9 +26,9 @@ FLAGS := -O2 -fPIC -DLUA_ANSI -DENABLE_CJSON_GLOBAL -DLUA_USE_MKSTEMP -fexceptio
 	-I$(LJ)/jni/luajava -I$(LJ)/lua51/jni/mod -I$(LUA_SRC) -I$(VK)/deps/lua/etc -I$(VK)/deps/fpconv -I.
 
 C_SRCS := $(addprefix $(LUA_SRC)/,lua_cjson.c lua_cmsgpack.c lua_struct.c lua_bit.c strbuf.c fpconv.c) \
-	$(VK)/deps/fpconv/fpconv_dtoa.c valkey_jni.c ../lua/valkey_globals.c
+	$(VK)/deps/fpconv/fpconv_dtoa.c valkey_jni.c ../lua/valkey_globals.c ../lua/valkey_reply.c
 
-build/$(LIB): $(LJ) $(VK) all.cc valkey_jni.c ../lua/valkey_globals.c
+build/$(LIB): $(LJ) $(VK) all.cc valkey_jni.c ../lua/valkey_globals.c ../lua/valkey_reply.c ../lua/valkey_reply.h
 	mkdir -p build/obj
 	$(CXX) $(FLAGS) $(CXXFLAGS) -c $(LJ)/lua51/jni/party_iroiro_luajava_lua51_Lua51Natives.cpp -o build/obj/natives.o
 	for f in $(C_SRCS); do $(CC) $(FLAGS) $(CFLAGS) -c $$f -o build/obj/$$(basename $$f .c).o || exit 1; done

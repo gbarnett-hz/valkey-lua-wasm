@@ -81,11 +81,11 @@ public final class WasmValkeyLua extends ValkeyLua {
         try {
             instance.memory().write(ptr, src);
             instance.memory().write(kvPtr, kv);
-            long status = instance.export("eval").apply(ptr, src.length, kvPtr, kv.length)[0];
+            int status = (int) instance.export("eval").apply(ptr, src.length, kvPtr, kv.length)[0];
+            if (status < 0) throw new IllegalStateException("reply conversion failed");
             int resPtr = (int) instance.export("result_ptr").apply()[0];
             int resLen = (int) instance.export("result_len").apply()[0];
-            String value = new String(instance.memory().readBytes(resPtr, resLen), StandardCharsets.UTF_8);
-            return new Result(status == 0, value);
+            return new Result(status == 0, instance.memory().readBytes(resPtr, resLen));
         } finally {
             instance.export("dealloc").apply(ptr);
             instance.export("dealloc").apply(kvPtr);

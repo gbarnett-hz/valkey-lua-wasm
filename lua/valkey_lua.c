@@ -14,6 +14,7 @@
 #include "fpconv_dtoa.h"
 #include "rand.h"
 #include "sha1.h"
+#include "valkey_reply.h"
 
 LUALIB_API int(luaopen_cjson)(lua_State *L);
 LUALIB_API int(luaopen_struct)(lua_State *L);
@@ -611,6 +612,7 @@ static int luaSetResp(lua_State *lua) {
         return lua_error(lua);
     }
     hostCallInt(lua, OP_SETRESP, resp, "server.setresp");
+    luaSetScriptResp(lua, resp);
     return 0;
 }
 
@@ -793,7 +795,7 @@ static int setKeysArgv(lua_State *L, const char *kv, size_t kv_len) {
     if (!kv_len || kv[0] != '*' || pushReply(L, kv, kv + kv_len, &error, 0) != kv + kv_len || error ||
         !lua_istable(L, -1) || lua_objlen(L, -1) != 2) {
         lua_settop(L, 0);
-        lua_pushstring(L, "malformed KEYS/ARGV buffer");
+        lua_pushstring(L, "ERR malformed KEYS/ARGV buffer");
         return 1;
     }
     /* open global protection to set KEYS and ARGV */
@@ -807,9 +809,8 @@ static int setKeysArgv(lua_State *L, const char *kv, size_t kv_len) {
     return 0;
 }
 
-/* Runs a script in a fresh state. Returns 0 on success, 1 on Lua error.
- * The first return value (or the error message) is converted with tostring()
- * and left in result_ptr/result_len until the next call. */
+/* Runs a script in a fresh state and leaves Valkey's RESP2 reply in result_ptr/result_len until the next call.
+ * Returns 0 if the script ran, 1 if it failed (the reply is an error), -1 if converting the reply raised. */
 __attribute__((export_name("eval"))) int eval(const char *src, size_t len, const char *kv, size_t kv_len) {
     lua_State *L = luaL_newstate();
     loadLib(L, "", luaopen_base);
@@ -868,28 +869,27 @@ __attribute__((export_name("eval"))) int eval(const char *src, size_t len, const
     lua_settable(L, -3);
     /* overwrite value of global variable 'math' with this modified math table present on top of stack. */
     lua_setglobal(L, "math");
+    luaInstallErrorHandler(L);
     luaLockGlobals(L);
 
+    int kind = EVAL_SETUP;
     lua_pushcfunction(L, resetHostState);
-    int status = lua_pcall(L, 0, 0, 0) || setKeysArgv(L, kv, kv_len) || luaL_loadbuffer(L, src, len, "@user_script") || lua_pcall(L, 0, 1, 0);
-
-    /* Errors raised as {err=...} tables (e.g. by redis.call) report their message. */
-    if (status && lua_istable(L, -1)) {
-        lua_getfield(L, -1, "err");
-        if (lua_isstring(L, -1)) lua_replace(L, -2);
-        else lua_pop(L, 1);
+    if (!lua_pcall(L, 0, 0, 0) && !setKeysArgv(L, kv, kv_len)) {
+        kind = EVAL_COMPILE;
+        if (!luaL_loadbuffer(L, src, len, "@user_script")) {
+            luaPushErrorHandler(L);
+            lua_insert(L, -2);
+            kind = lua_pcall(L, 0, 1, -2) ? EVAL_RUN : EVAL_OK;
+            lua_remove(L, -2); /* the error handler */
+        }
     }
 
-    lua_getglobal(L, "tostring");
-    lua_insert(L, -2);
-    lua_call(L, 1, 1);
-    size_t n;
-    const char *s = lua_tolstring(L, -1, &n);
+    respBuf out = {0};
+    int status = luaEvalReply(L, kind, &out) ? -1 : kind != EVAL_OK;
     free(result);
-    result = malloc(n);
-    memcpy(result, s, n);
-    result_size = n;
+    result = out.buf;
+    result_size = out.len;
 
     lua_close(L);
-    return status ? 1 : 0;
+    return status;
 }
