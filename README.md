@@ -40,12 +40,38 @@ JNI-specific hazards handled in `ValkeyLua`:
   from Java into Lua is protected; where `main` would trap (a failing `__tostring` on the result), this branch throws
   and poisons the instance.
 
-Found by diffing probe scripts against `main`: `lua.wasm` is wasm32, so `lua_Integer` and C `long` are 32-bit there.
-`string.format('%d', 2^40)` gives `2147483647` and `struct.pack('<i8', 2^40)` truncates on `main`; this branch, like
-64-bit Valkey, gets them right.
-
 - The natives are loaded once per JVM; each `eval` runs in a fresh `lua_State` (`new Lua51()`), as on `main`.
-- `os.tmpname` works (native `mkstemp`), unlike on `main`.
+
+## Where this branch matches Valkey and `main` does not
+
+Found by diffing ~90 probe scripts between the two builds; pinned by the four tests after the comment
+"Valkey runs on 64-bit hosts" in `ValkeyLuaTest`. All have one cause: Valkey runs on 64-bit hosts, while `lua.wasm` is
+wasm32, so `lua_Integer` (`ptrdiff_t`), C `long` and `size_t` are 32-bit there. Everything else matched, including
+cjson, cmsgpack, number formatting of call arguments and every error message probed.
+
+| Script | Valkey and this branch | `main` |
+|---|---|---|
+| `string.format('%d', 2^40)` (also `%i %x %X %o %u`) | `1099511627776` | `2147483647` (truncated through 32-bit `long`) |
+| `struct.size('l')`, `'L'`, `'T'` | `8` | `4` |
+| `struct.unpack('>l', struct.pack('>l', 2^40))`, same with `'<i8'` | `1099511627776` | `-1` (packed through 32-bit `long`) |
+| `math.random(2^40)` | error `interval is empty` (`(int)(int64)2^40` is 0) | a random number (the cast saturates to `INT_MAX`) |
+| `math.randomseed(2^40)` | same sequence as `randomseed(0)` | seeds with `INT_MAX` |
+| `select('#', unpack({}, 1, 2^31))` | `0` | error `too many results to unpack` |
+
+Rebuilding `main`'s wasm with the following passes `main`'s tests and fixes all six rows:
+
+- `-DLUA_USELONGLONG` (`luaconf.h` switch: `string.format` uses `%lld`/`long long`).
+- `-DSTRUCT_INT='long long'` (`lua_struct.c` guards it with `#ifndef`).
+- Patch `luaconf.h`: `#define LUA_INTEGER long long` (unconditional, so `-D` can't override it).
+- Patch `lua_struct.c` `optsize`: `'l'`/`'L'`/`'T'` return `sizeof(long long)`.
+
+That build still differs from Valkey for string indices of 2^32 and above: `string.sub`, `string.byte` and others
+hold indices in `ptrdiff_t`, which is still 32-bit, so `string.sub('abcdef', 2^32 + 2, 2^32 + 3)` returns `"bc"`
+instead of `""`. Unpatched `main` happens to get these right because the cast saturates; the test
+`stringIndicesBeyond32BitsAreNotTruncated` catches the regression. Only wasm64 removes the 32-bit types entirely.
+
+Not differences: the `os` library has only `os.clock` in both (Valkey's `loslib.c`), and `tostring` of tables and
+functions prints 64-bit addresses here (cosmetic).
 
 ## What runs in Lua (before the Handler)
 

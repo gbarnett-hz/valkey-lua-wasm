@@ -433,6 +433,39 @@ class ValkeyLuaTest {
         assertEquals("user_script:1: wrong number of arguments", lua.eval("return math.random(1, 2, 3)").value());
     }
 
+    /*
+     * Valkey runs on 64-bit hosts, where lua_Integer (ptrdiff_t), C long and size_t are 64-bit. lua.wasm on main is
+     * wasm32, where they are 32-bit: the first three fail there. The last passes on main only because wasm32
+     * saturates out-of-range casts, and fails if LUA_INTEGER alone is widened. Expected values are 64-bit Valkey's.
+     */
+
+    @Test
+    void stringFormatIntegersAre64Bit() {
+        assertEquals("1099511627776|-2147483649|10000000000|200000000|400000000000|4294967296",
+            ok("return string.format('%d|%i|%x|%X|%o|%u', 2^40, -2^31-1, 2^40, 2^33, 2^35, 2^32)"));
+    }
+
+    @Test
+    void structLongAndSizeTAre64Bit() {
+        assertEquals("8 8 8 4", ok("return struct.size('l')..' '..struct.size('L')..' '..struct.size('T')..' '..struct.size('i')"));
+        assertEquals("1099511627776", ok("return struct.unpack('>l', struct.pack('>l', 2^40))"));
+        assertEquals("1099511627776", ok("return struct.unpack('<i8', struct.pack('<i8', 2^40))"));
+    }
+
+    @Test
+    void intArgumentsKeepLow32BitsOf64BitInteger() {
+        // luaL_checkint is (int)(lua_Integer)d: 2^40 -> 0, 2^31 -> -2^31. wasm32 saturates to INT_MAX instead.
+        assertEquals("user_script:1: bad argument #1 to 'random' (interval is empty)", lua.eval("return math.random(2^40)").value());
+        assertEquals("true", ok("math.randomseed(2^40) local a = math.random(100) math.randomseed(0) return tostring(a == math.random(100))"));
+        assertEquals("0", ok("return select('#', unpack({}, 1, 2^31))"));
+    }
+
+    @Test
+    void stringIndicesBeyond32BitsAreNotTruncated() {
+        assertEquals("|abcdef", ok("return string.sub('abcdef', 2^32 + 2, 2^32 + 3) .. '|' .. string.sub('abcdef', -2^32)"));
+        assertEquals("0", ok("return select('#', string.byte('abc', 2^32 + 1))"));
+    }
+
     private static byte[] b(String s) {
         return s.getBytes(StandardCharsets.UTF_8);
     }
