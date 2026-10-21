@@ -2,6 +2,7 @@ package valkeylua;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -46,6 +47,31 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
         assertEquals(result(false, error("ERR Error running script, not enough memory")),
             lua.eval("local s = 'x' for i = 1, 31 do s = s .. s end return #s"));
         assertEquals(result(true, integer(1)), lua.eval("return 1"));
+    }
+
+    @Test
+    void deepReplyNestingPoisons() throws Exception {
+        // Converting the reply recurses per nesting level, as Valkey does; on Chicory that is bounded by the JVM thread
+        // stack (about 3650 levels at 1 MiB) before Valkey's own `reached lua stack limit` (about 8000) fires.
+        var thrown = new AtomicReference<Throwable>();
+        var after = new AtomicReference<Throwable>();
+        var t = new Thread(null, () -> {
+            var l = create(args -> "+OK\r\n".getBytes(UTF_8));
+            try {
+                l.eval("local t = {} for i = 1, 8000 do t = {t} end return t");
+            } catch (Throwable e) {
+                thrown.set(e);
+            }
+            try {
+                l.eval("return 1");
+            } catch (Throwable e) {
+                after.set(e);
+            }
+        }, "eval-1m", 1024 * 1024);
+        t.start();
+        t.join();
+        assertInstanceOf(com.dylibso.chicory.wasm.ChicoryException.class, thrown.get());
+        assertInstanceOf(IllegalStateException.class, after.get());
     }
 
     @Test

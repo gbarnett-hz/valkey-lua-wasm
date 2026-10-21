@@ -1,7 +1,7 @@
 # Where `lua.wasm` differs from Valkey
 
 Sections 1–6 come from wasm32's 32-bit types; sections 7–9 come from how `lua.wasm` is built and run (C stack size,
-Chicory's memory limit, pointer size).
+Chicory's memory limit, pointer size); section 10 from the eval reply and the C library.
 
 **Status:** sections 1–4 and 7 are fixed. `lua/Makefile` applies the patches in `lua/patches/` and two compile switches
 (section 6), so every value derived from a Lua integer is 64-bit, as on Valkey, and links an 8 MiB C stack. The "Wasm"
@@ -17,11 +17,12 @@ observes.
 | Memory cap | Lua heap, C stack and static data share Chicory's 32767 pages (just under 2 GiB, less the 8 MiB stack). A script that needs more gets the ordinary Lua error `not enough memory`; `pcall` can catch it and the instance survives. Valkey has no Lua-specific limit. | 8 |
 | Memory accounting and GC timing | Objects are smaller with 32-bit pointers, so `collectgarbage('count')` returns smaller figures, the incremental collector runs at different points, and weak tables lose entries at different times. | 9 |
 | `tostring` address width | `tostring` of tables, functions and so on prints a 32-bit address (`table: 0x1e3f0`). Cosmetic. | 5 |
-| JVM thread stack bounds deep recursion | Valkey's own limits (cjson, `C stack overflow`) need at least 512 KiB of JVM thread stack, which every default meets. Recursion Valkey does not limit (`cmsgpack.unpack` nesting, pattern backtracking) is bounded by the JVM stack instead of an 8 MiB native one: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the instance where Valkey returns a table. | 7 |
+| JVM thread stack bounds deep recursion | Valkey's own limits (cjson, `C stack overflow`) need at least 512 KiB of JVM thread stack, which every default meets. Recursion Valkey does not limit (`cmsgpack.unpack` nesting, pattern backtracking, converting a nested return value) is bounded by the JVM stack instead of an 8 MiB native one: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the instance where Valkey returns a table. | 7 |
+| Out-of-range number returned | `return 2^63`, `1/0`, `-1/0` give the int64 limits and `0/0` gives `:0`: the `(long long)` cast compiles to `i64.trunc_sat_f64_s`. Valkey and JNI match on arm64; on x86-64 they give `:-9223372036854775808` for all of these (the cast is undefined in C). | 10 |
+| String collation | Lua compares strings with `strcoll`. `lua.wasm` has only the C locale; Valkey (`locale-collate`, default `""`) and JNI use the process locale. Under `en_US.UTF-8`, `'a' < 'B'` is `true` on Valkey and JNI and `false` on Wasm, so `table.sort` of mixed-case strings orders differently. | 10 |
 | Memory kept after growth | Wasm memory never shrinks, so an instance that once grew near the cap keeps that `byte[]` (up to ~2 GiB of JVM heap) for its life. | 8 |
 | `string.dump` output | Bytecode headers record `sizeof(size_t)` (4, not 8) and sizes, so dumps differ in bytes and length (`#string.dump(function() return 'abc' end)` is 98, not 106). | 5 |
 | `pairs` order over table- or function-keyed tables | Those keys hash by address; 32-bit addresses give a different iteration order. | 5 |
-| Exception when something escapes `eval` | A failing `__tostring` on the result traps in Chicory (`WasiExitException`); JNI throws `IllegalStateException`. Both poison the instance. | — |
 
 Valkey runs on 64-bit hosts (x86_64, arm64), where `ptrdiff_t`, `long`, `unsigned long`, `size_t` and pointers are
 64-bit. `lua.wasm` is built for wasm32, where all of them are 32-bit. Valkey's bundled Lua 5.1 (`deps/lua`) and its
@@ -245,6 +246,16 @@ returns a result. A larger thread stack raises the depth roughly in proportion. 
 dedicated large-stack thread would remove it, but it changes `WasmValkeyLua` and how evals interact with virtual
 threads, which this change did not take on. Linux x86_64 was not measured.
 
+Converting a nested return value to its reply recurses once per level too (`luaReplyToServerReply`, ported as is
+in `lua/valkey_reply.c`). Valkey stops it at about 8000 levels with `-ERR reached lua stack limit` (the Lua stack's
+`LUAI_MAXCSTACK`). For `local t = {} for i = 1, N do t = {t} end return t`, measured on macOS arm64 (the deepest that
+replied / the shallowest that failed):
+
+| Backend | 1 MiB | 2 MiB |
+|---|---|---|
+| Wasm | 3638 / 3656: `ChicoryException`, instance poisoned | 4270 / 4288: same |
+| JNI | 6984 / 7000: JVM killed (SIGILL) | reaches `reached lua stack limit` at 8000, as Valkey |
+
 The JNI backend is worse here: luajava runs Lua's C code on the thread's native stack, so overflowing it kills the JVM
 (SIGILL). The 250-level `string.gsub` case does so at 512 KiB and passes at 768 KiB and up; the `string.find` case
 at N = 20000 does so at the 2 MiB default and passes at 8 MiB.
@@ -294,6 +305,21 @@ What a script observes:
 
 Not fixable on wasm32, and not tested.
 
+## 10. The eval reply and the C library
+
+`eval` returns Valkey's RESP2 reply, built by `lua/valkey_reply.c` on both backends, so the bytes match. Two inputs
+still differ, both probed:
+
+- **Out-of-range numbers.** A returned number becomes `:` + `(long long)` of the double. Out of range, or NaN, that
+  cast is undefined in C. arm64 hardware saturates (NaN gives 0), x86-64 gives `INT64_MIN`, and wasi-sdk 34 compiles
+  it to `i64.trunc_sat_f64_s`, which saturates. So Wasm always matches Valkey on arm64. On x86-64, Valkey and JNI give
+  `:-9223372036854775808` for `2^63`, `1/0`, `-1/0` and `0/0`, where Wasm gives `:9223372036854775807`,
+  `:9223372036854775807`, `:-9223372036854775808` and `:0`.
+- **String collation.** Lua's `<` on strings and `table.sort` call `strcoll`. Valkey sets `LC_COLLATE` from
+  `locale-collate` (default `""`, the environment), and the JVM sets the process locale too, so JNI follows it:
+  `return tostring('a' < 'B')` is `true` under `en_US.UTF-8` and `false` under `LC_ALL=C`. wasi-libc has only the C
+  locale, so Wasm gives `false` everywhere. Not fixed: matching would need collation tables in `lua.wasm`.
+
 ## Tests
 
 `ValkeyLuaTest` runs on both backends (`WasmValkeyLuaTest`, `JniValkeyLuaTest`) and pins 64-bit Valkey's values for
@@ -312,4 +338,6 @@ sections 1–4:
 `stringIndicesBeyond32BitsAreNotTruncated` and `structUnpackPositionIs64Bit` passed on the unpatched build too; they
 guard against a partial patch. Section 7: `nestingRaisesValkeysErrors` (shared) and
 `nestingErrorsAtMinimumThreadStack` (Wasm-only, runs on a 512 KiB thread). Section 8:
-`memoryCapIsAnOrdinaryLuaError` (Wasm-only). Sections 5 and 9 are documented, not tested.
+`memoryCapIsAnOrdinaryLuaError` (Wasm-only). Section 7's reply nesting: `deepReplyNestingPoisons` (Wasm-only, 1 MiB
+thread). Section 10: `numberCastSaturates` (Wasm) and `numberCastFollowsHardware` (JNI). Sections 5 and 9 and string
+collation are documented, not tested.

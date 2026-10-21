@@ -80,14 +80,18 @@ JNI-specific hazards handled in `JniValkeyLua`:
 - Lua errors are C++ exceptions and must never unwind through Java frames, so callbacks raise by returning `-1`
   and the lauxlib error helpers (`luaL_error`, `luaL_checkint`) are rebuilt in Java.
 - An unprotected Lua error reaches luajava's panic handler, which calls `FatalError` and kills the JVM. Every call
-  from Java into Lua is protected; where the Wasm backend traps (a failing `__tostring` on the result), this one
-  throws `IllegalStateException` and poisons the instance.
+  from Java into Lua is protected. Building the reply runs protected too (in `lua/valkey_reply.c`, on both
+  backends): a raising `__index` on an error table, which would be a Lua panic on Valkey, throws
+  `IllegalStateException` and poisons the instance.
 - The natives are loaded once per JVM.
 - Lua's C code runs on the calling thread's native stack, so a script that recurses deeper than that stack kills the
   JVM (SIGILL), not just the eval. Measured on macOS arm64: nesting `string.gsub` callbacks 250 deep needs more than
   512 KiB (768 KiB and up raise Valkey's `C stack overflow`); `string.find(string.rep('a', 20000),
-  string.rep('a?', 20000))` kills the JVM at the 2 MiB default and works at 8 MiB, Valkey's native default. Run JNI
-  evals on threads with Valkey-sized (8 MiB) stacks.
+  string.rep('a?', 20000))` kills the JVM at the 2 MiB default and works at 8 MiB, Valkey's native default.
+  Converting a nested return value also recurses once per level, as on Valkey: at 2 MiB, Valkey's
+  `-ERR reached lua stack limit` (about 8000 levels) fires first; at 1 MiB (the Linux x86-64 default), about 7000
+  levels (`local t = {} for i = 1, 7000 do t = {t} end return t`) kills the JVM. Run JNI evals on threads with
+  Valkey-sized (8 MiB) stacks.
 
 ## Where the backends differ
 
@@ -101,14 +105,16 @@ hosts" in `ValkeyLuaTest` pin Valkey's values on both backends. What remains:
 | Memory cap | Chicory allows just under 2 GiB, less the 8 MiB C stack. Past it a script gets the Lua error `not enough memory`, which `pcall` can catch; the instance survives. Valkey has no Lua-specific limit. |
 | Memory accounting and GC timing | 32-bit pointers make objects smaller, so `collectgarbage('count')` figures, collector timing and weak-table clearing differ. |
 | `tostring` address width | 32-bit addresses (`table: 0x1e3f0`). Cosmetic. |
-| JVM thread stack bounds deep recursion | Valkey's own nesting limits need 512 KiB (every default meets it). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern backtracking) is bounded by the JVM stack: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the instance where Valkey returns a table. |
+| JVM thread stack bounds deep recursion | Valkey's own nesting limits need 512 KiB (every default meets it). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern backtracking, converting a nested return value) is bounded by the JVM stack: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the instance where Valkey returns a table, and returning a table nested about 3650 deep (4280 at 2 MiB) throws `ChicoryException` and poisons it where Valkey replies (or, from about 8000, sends `reached lua stack limit`). |
+| Out-of-range number returned | `(long long)` of the double saturates: `return 2^63` gives `:9223372036854775807`, `1/0` and `-1/0` the int64 limits, `0/0` gives `:0`. That matches JNI and Valkey on arm64; on x86-64 they give `:-9223372036854775808` for all of these (the cast is undefined in C). |
+| String collation | Lua compares strings with `strcoll`. `lua.wasm` always uses the C locale; Valkey (`locale-collate`, default `""`) and JNI use the process locale, so under `en_US.UTF-8` `'a' < 'B'` is true there and false on Wasm, and `table.sort` of strings orders differently. |
 | Memory kept after growth | Wasm memory never shrinks: an instance that grew near the cap keeps up to ~2 GiB of JVM heap until discarded. |
 | `string.dump` output | Headers record a 4-byte `size_t`, so dumps differ in bytes and length. |
 | `pairs` order over table- or function-keyed tables | Those keys hash by address, so iteration order differs. |
-| Escape from `eval` (failing `__tostring`) | Chicory trap (`WasiExitException`) instead of JNI's `IllegalStateException`; both poison the instance. |
 
-Not differences: the `os` library has only `os.clock` in both (Valkey's `loslib.c`), and `tostring` of tables and
-functions prints 64-bit addresses on JNI (cosmetic).
+Not differences: the `os` library has only `os.clock` in both (Valkey's `loslib.c`), `tostring` of tables and
+functions prints 64-bit addresses on JNI (cosmetic), and an error raised while the reply is built (a raising `__index`
+on an error table) throws `IllegalStateException` and poisons the instance on both.
 
 ## What runs in Lua (before the Handler)
 
@@ -189,6 +195,42 @@ var vl = new JniValkeyLua(handler);   // or new WasmValkeyLua(Path.of("lua/lua.w
 var r = vl.eval("redis.call('SET', KEYS[1], ARGV[1]); return redis.call('GET', KEYS[1])",
         List.of("k".getBytes()), List.of("v".getBytes()));   // Result[ok=true, reply=$1\r\nv\r\n]
 ```
+
+## Script reply
+
+`eval` returns `Result(ok, reply)`. `reply` is the RESP2 reply Valkey would send the client, built by C shared by both
+backends (`lua/valkey_reply.c`, ported from `script_lua.c`'s `luaReplyToServerReply` and `luaCallFunction`).
+
+| Script returns | Reply |
+|---|---|
+| string | bulk `$<len>`, binary-safe |
+| number | `:` + the double cast to `long long` (truncates; see "Where the backends differ" for out-of-range values) |
+| `true` | `:1` |
+| `false` | `$-1`; `:0` after the script called `setresp(3)` (each `eval` starts at RESP 2) |
+| `nil`, a function, userdata, a thread | `$-1` |
+| table with string `err` | error reply `-<err>`, cut at the first NUL, CR/LF mapped to spaces |
+| table with string `ok` | `+<ok>`, cut at the first NUL, CR/LF mapped to spaces |
+| table with number `double` | bulk string: `nan`, `inf`, `-inf`, `-0`, the integer when exact, else the shortest round-trip form |
+| table with string `big_number` | bulk string, cut at the first NUL, CR/LF mapped to spaces |
+| table with `verbatim_string = {format=..., string=...}` | bulk string of `string`, binary-safe |
+| table with table `map` / `set` | flat array: key then value per entry / the keys, in `next` order |
+| any other table | array of `t[1]`, `t[2]`, ... up to the first `nil`, converted recursively |
+| nested more deeply than the Lua stack allows | `-ERR reached lua stack limit` in place of that element |
+
+Fields are checked in that order with `rawget`, so a table's metatable doesn't change the type.
+
+Failures, with `ok=false`:
+
+| Failure | Reply |
+|---|---|
+| Lua error, e.g. `error('x')` | `-ERR user_script:1: x script: on @user_script:1.` (Valkey's error handler adds `ERR` to non-table errors and the position) |
+| Error table, e.g. from `redis.call` or `error({err='WRONGTYPE bad'})` | `-WRONGTYPE bad script: on @user_script:1.`; `-ERR unknown error ...` if `err` is not a string or number |
+| Error that skips the handler (`not enough memory`, `error in error handling`) | `-ERR Error running script, <first 100 bytes>` |
+| Syntax error | `-ERR Error compiling script (new function): user_script:1: <Lua's message>` |
+| Per-eval reset or KEYS/ARGV buffer failed (this port only) | `-<err>` with no position, e.g. `-ERR malformed KEYS/ARGV buffer` |
+
+Error text always has trailing CR/LF trimmed and the rest mapped to spaces. Valkey's error handler is also installed
+as the globals `__server__err__handler` and `__redis__err__handler`.
 
 ## Reply contract
 
@@ -285,7 +327,5 @@ exception, never a silently wrong value. An error reply is never "wrong type": i
 
 ## Not covered
 
-Script timeouts and SCRIPT KILL, RESP3 reply parsing,
-script return value → RESP conversion (eval still returns `tostring` of the result), FUNCTION/FCALL,
-EVAL's server-side error formatting (`script: <sha>, on @user_script:1.`) and its error-handler globals
-(`__server__err__handler`, `__redis__err__handler`), `lua-enable-insecure-api`, thread safety.
+Script timeouts and SCRIPT KILL, RESP3 reply parsing and RESP3 output to the client, FUNCTION/FCALL,
+EVAL's error stats (`ignore_error_stats_update`), `lua-enable-insecure-api`, thread safety.

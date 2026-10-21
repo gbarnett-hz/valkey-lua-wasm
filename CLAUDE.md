@@ -38,6 +38,8 @@ cd java && mvn test -Dtest='*ValkeyLuaTest#testName'       # one shared test, bo
   (an unprotected error reaches luajava's panic handler and kills the JVM). luajava's `java` global is removed per state.
 - Globals protection is C shared by both builds (`lua/valkey_globals.c`); it runs after setup, so a global added
   during setup must be on its allow list or it is dropped.
+- Valkey's EVAL error handler, the reply conversion and error formatting are also shared C (`lua/valkey_reply.c`),
+  so `Result.reply` is byte-identical on both backends; JNI reaches it through natives in `native/valkey_jni.c`.
 - Each `eval` runs in a fresh `lua_State` on both backends. Not thread-safe.
 
 ## Fidelity rule and tests
