@@ -512,6 +512,12 @@ abstract class ValkeyLuaTest {
             + "return hex(cmsgpack.pack(2^40)) .. ' ' .. hex(cmsgpack.pack(-2^40)) .. ' ' .. tostring(cmsgpack.unpack(cmsgpack.pack(-2^40)))"));
     }
 
+    @Test
+    void collectgarbageStepSizeIs64Bit() {
+        // lapi.c shifts the step size (KiB) left by 10 into a size_t; 2^22 KiB would wrap to 0 in 32 bits.
+        assertEquals("true", ok("collectgarbage() local t = {} for i=1,20000 do t[i] = {} end t = nil return tostring(collectgarbage('step', 2^22))"));
+    }
+
     /*
      * Valkey's own nesting limits (cjson's 1000 levels, LUAI_MAXCCALLS of 200) must fire before any stack runs out:
      * lua.wasm's C stack, or the JVM thread stack Chicory's compiled code runs on. See wasm-difference.md section 7.

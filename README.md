@@ -35,13 +35,15 @@ Both backends run each `eval` in a fresh `lua_State` and are not thread-safe. Th
   (`-mllvm -wasm-enable-sjlj -lsetjmp -mllvm -wasm-use-legacy-eh=false`). Chicory rejects the legacy EH opcodes, so the last flag is required.
 - Runs on Chicory's runtime compiler (`lua.wasm` → JVM bytecode at instantiation), not the default interpreter.
 - The module exports `eval(src_ptr, src_len, kv_ptr, kv_len) -> status` and `result_ptr`/`result_len`.
-- 64-bit integers, as on Valkey: `-DLUA_USELONGLONG`, `-DSTRUCT_INT='long long'` and five patches in `lua/patches/`
-  (`luaconf.h`, `lua_struct.c`, `lbaselib.c`, `lstrlib.c`, `lua_cmsgpack.c`), applied with `patch -F 0` so one that
+- 64-bit integers, as on Valkey: `-DLUA_USELONGLONG`, `-DSTRUCT_INT='long long'` and six patches in `lua/patches/`
+  (`luaconf.h`, `lua_struct.c`, `lbaselib.c`, `lstrlib.c`, `lua_cmsgpack.c`, `lapi.c`), applied with `patch -F 0` so one that
   no longer applies exactly fails the build. What each fixes is in [wasm-difference.md](wasm-difference.md).
 - 8 MiB C stack (`-Wl,-z,stack-size=8388608`), so Valkey's own nesting limits (cjson's 1000 levels, `C stack
-  overflow`) fire before it runs out. Evals must run on a thread with at least 512 KiB of stack; every JVM default
-  meets this (1 MiB on Linux x86_64, 2 MiB on macOS arm64). Below that, deep nesting can overflow the JVM stack, and
-  the instance is poisoned.
+  overflow`) fire before it runs out. Those need at least 512 KiB of JVM thread stack; every JVM default meets this
+  (1 MiB on Linux x86_64, 2 MiB on macOS arm64). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern
+  backtracking) is bounded by the JVM thread stack instead: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the
+  instance where Valkey returns a table. Depths per stack size are in [wasm-difference.md](wasm-difference.md)
+  section 7.
 
 ## JNI backend
 
@@ -72,9 +74,11 @@ JNI-specific hazards handled in `JniValkeyLua`:
   from Java into Lua is protected; where the Wasm backend traps (a failing `__tostring` on the result), this one
   throws `IllegalStateException` and poisons the instance.
 - The natives are loaded once per JVM.
-- Lua's C code runs on the calling thread's native stack. Measured: at a 512 KiB thread stack, a script nesting
-  `string.gsub` callbacks 250 deep overflows it and the JVM dies (SIGILL); 768 KiB and up (the JVM defaults are 1 MiB
-  and more) raise Valkey's `C stack overflow`. Don't run evals on threads with small stacks.
+- Lua's C code runs on the calling thread's native stack, so a script that recurses deeper than that stack kills the
+  JVM (SIGILL), not just the eval. Measured on macOS arm64: nesting `string.gsub` callbacks 250 deep needs more than
+  512 KiB (768 KiB and up raise Valkey's `C stack overflow`); `string.find(string.rep('a', 20000),
+  string.rep('a?', 20000))` kills the JVM at the 2 MiB default and works at 8 MiB, Valkey's native default. Run JNI
+  evals on threads with Valkey-sized (8 MiB) stacks.
 
 ## Where the backends differ
 
@@ -88,7 +92,10 @@ hosts" in `ValkeyLuaTest` pin Valkey's values on both backends. What remains:
 | Memory cap | Chicory allows just under 2 GiB, less the 8 MiB C stack. Past it a script gets the Lua error `not enough memory`, which `pcall` can catch; the instance survives. Valkey has no Lua-specific limit. |
 | Memory accounting and GC timing | 32-bit pointers make objects smaller, so `collectgarbage('count')` figures, collector timing and weak-table clearing differ. |
 | `tostring` address width | 32-bit addresses (`table: 0x1e3f0`). Cosmetic. |
-| Minimum thread stack | Evals need at least 512 KiB of JVM thread stack (every default meets it); below that deep nesting poisons the instance. |
+| JVM thread stack bounds deep recursion | Valkey's own nesting limits need 512 KiB (every default meets it). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern backtracking) is bounded by the JVM stack: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the instance where Valkey returns a table. |
+| Memory kept after growth | Wasm memory never shrinks: an instance that grew near the cap keeps up to ~2 GiB of JVM heap until discarded. |
+| `string.dump` output | Headers record a 4-byte `size_t`, so dumps differ in bytes and length. |
+| `pairs` order over table- or function-keyed tables | Those keys hash by address, so iteration order differs. |
 | Escape from `eval` (failing `__tostring`) | Chicory trap (`WasiExitException`) instead of JNI's `IllegalStateException`; both poison the instance. |
 
 Not differences: the `os` library has only `os.clock` in both (Valkey's `loslib.c`), and `tostring` of tables and

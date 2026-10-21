@@ -1,0 +1,12 @@
+--- a/deps/lua/src/lapi.c
++++ b/deps/lua/src/lapi.c
+@@ -930,7 +930,8 @@
+       break;
+     }
+     case LUA_GCSTEP: {
+-      lu_mem a = (cast(lu_mem, data) << 10);
++      /* wasm32: lu_mem (size_t) on Valkey's 64-bit hosts; 32 bits would wrap step sizes of 2^22 KiB and more. */
++      unsigned long long a = ((unsigned long long)data << 10);
+       if (a <= g->totalbytes)
+         g->GCthreshold = g->totalbytes - a;
+       else

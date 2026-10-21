@@ -17,7 +17,10 @@ observes.
 | Memory cap | Lua heap, C stack and static data share Chicory's 32767 pages (just under 2 GiB, less the 8 MiB stack). A script that needs more gets the ordinary Lua error `not enough memory`; `pcall` can catch it and the instance survives. Valkey has no Lua-specific limit. | 8 |
 | Memory accounting and GC timing | Objects are smaller with 32-bit pointers, so `collectgarbage('count')` returns smaller figures, the incremental collector runs at different points, and weak tables lose entries at different times. | 9 |
 | `tostring` address width | `tostring` of tables, functions and so on prints a 32-bit address (`table: 0x1e3f0`). Cosmetic. | 5 |
-| Minimum thread stack | Evals must run on a JVM thread with at least 512 KiB of stack (every JVM default meets this). Below that, deep nesting overflows the JVM stack and the instance is poisoned. | 7 |
+| JVM thread stack bounds deep recursion | Valkey's own limits (cjson, `C stack overflow`) need at least 512 KiB of JVM thread stack, which every default meets. Recursion Valkey does not limit (`cmsgpack.unpack` nesting, pattern backtracking) is bounded by the JVM stack instead of an 8 MiB native one: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the instance where Valkey returns a table. | 7 |
+| Memory kept after growth | Wasm memory never shrinks, so an instance that once grew near the cap keeps that `byte[]` (up to ~2 GiB of JVM heap) for its life. | 8 |
+| `string.dump` output | Bytecode headers record `sizeof(size_t)` (4, not 8) and sizes, so dumps differ in bytes and length (`#string.dump(function() return 'abc' end)` is 98, not 106). | 5 |
+| `pairs` order over table- or function-keyed tables | Those keys hash by address; 32-bit addresses give a different iteration order. | 5 |
 | Exception when something escapes `eval` | A failing `__tostring` on the result traps in Chicory (`WasiExitException`); JNI throws `IllegalStateException`. Both poison the instance. | — |
 
 Valkey runs on 64-bit hosts (x86_64, arm64), where `ptrdiff_t`, `long`, `unsigned long`, `size_t` and pointers are
@@ -122,7 +125,13 @@ never runs. Both give `549755813887` and `1099511627776` (probed).
 - **Memory ceiling (from the types):** the whole Lua heap, every string length (`size_t`) and the garbage
   collector's byte counters (`lu_mem`/`l_mem`) fit in wasm32's 4 GiB address space. Chicory's own limit is lower and
   is reached first; see section 8. Because every allocation fits under it, a 32-bit `size_t` never truncates a real
-  length.
+  length. It did truncate one value computed from a Lua integer, the `collectgarbage('step', n)` size, which the
+  `lapi.c` patch fixes (section 6).
+- **`string.dump` (probed):** the bytecode header records `sizeof(size_t)`, 4 on wasm and 8 on Valkey, and string
+  lengths are written at that width, so dumps differ: `#string.dump(function() return 'abc' end)` is 98 on wasm and
+  106 on JNI.
+- **`pairs` order (probed):** tables, functions and other objects used as table keys hash by their address, so the
+  order `pairs` visits them in differs.
 
 ## 6. The fix in the Wasm build
 
@@ -145,6 +154,7 @@ exactly fails the build, and changing a patch or `VALKEY_SHA` re-extracts):
 | `lbaselib.c.patch` | `strtoul` → `strtoull`, `unsigned long long n` | section 4 |
 | `lstrlib.c.patch` | `posrelat` and the `str_sub`, `str_byte`, `str_find_aux` positions `ptrdiff_t` → `lua_Integer`; their `(size_t)` comparisons → `unsigned long long` | positions would otherwise truncate (section 1) |
 | `lua_cmsgpack.c.patch` | `BITS_32` forced to 0 | it tests pointer width, which stays 32-bit; the 64-bit path uses `lua_Integer` (section 1) |
+| `lapi.c.patch` | `lua_gc`'s `LUA_GCSTEP` size `lu_mem` (`size_t`) → `unsigned long long` | `collectgarbage('step', n)` shifts `n` KiB left by 10, which wraps at 2^22 in 32 bits; test `collectgarbageStepSizeIs64Bit` |
 
 The sites were found by grepping `deps/lua/src` for integer types and conversions (`long`, `strtoul`, `ptrdiff_t`,
 `lua_Integer`, `luaL_checkinteger`, `luaL_optinteger`, `lua_tointeger`, `size_t`) and for code that branches on
@@ -166,8 +176,9 @@ it today (checked):
 - **wasi-sdk 34** ships sysroots only for `wasm32-wasip1`, `wasm32-wasip1-threads`, `wasm32-wasip2` and
   `wasm32-wasip3`. There is no wasm64 libc, so Lua cannot be built for `wasm64-wasip1`.
 
-So the Wasm backend stays wasm32. The patches above fix every observable integer difference; the remaining
-`size_t`/pointer width shows only through the memory ceiling (section 8) and `tostring` addresses (section 5).
+So the Wasm backend stays wasm32. The patches above fix every integer difference found. The remaining `size_t` and
+pointer width shows through the memory ceiling (section 8), memory accounting (section 9), and `tostring`,
+`string.dump` and `pairs` order (section 5).
 
 ## 7. The C stack was 64 KiB, so deep nesting trapped instead of raising Valkey's error
 
@@ -200,9 +211,9 @@ The stack is placed at the bottom of linear memory, so an overflow runs below ad
 overwrite the heap.
 
 These matched on both backends (probed): Lua-to-Lua recursion (15000 levels succeeds, 200000 raises `stack overflow`),
-`pcall` recursing until `C stack overflow`, `cmsgpack.pack` and `cmsgpack.unpack` nested 2000–3000 deep, an
-`__index` chain 190 deep, a `string.find` pattern nested 5000 deep, and the parser's nesting limit
-(`loadstring` of 300 nested parentheses).
+`pcall` recursing until `C stack overflow`, `cmsgpack.pack` nested 2000 deep, an `__index` chain 190 deep, and the
+parser's nesting limit (`loadstring` of 300 nested parentheses). `cmsgpack.unpack` nesting and `string.find`
+backtracking also matched in that run, but how deep they can go depends on the JVM thread stack (below).
 
 **The fix, and the JVM thread stack.** With 8 MiB, Valkey's own limits fire first and give the same errors as Valkey.
 Chicory's compiler turns Wasm calls into JVM calls on the calling thread, so the deeper Wasm stack also uses more of
@@ -215,9 +226,28 @@ the JVM thread's stack. Measured with the four cases above:
 | 512 KiB | Valkey's errors, instance survives | same |
 | 256 KiB | `ChicoryException` escapes `eval`; instance poisoned | same |
 
-So Wasm evals need a thread stack of at least 512 KiB, which every JVM default meets. The JNI backend needs more:
-luajava runs Lua's C code on the thread's native stack, and at 512 KiB the 250-level `string.gsub` case overflows it
-and the JVM dies (SIGILL). It passed at 768 KiB, 1 MiB and 2 MiB.
+So for the limits Valkey itself enforces, Wasm evals need a thread stack of at least 512 KiB, which every JVM default
+meets.
+
+**Recursion Valkey does not limit is bounded by the JVM thread stack.** Some C code recurses as deep as the input
+asks, with no limit of its own: `cmsgpack.unpack` of nested arrays, and `string.find`/`match`/`gsub` backtracking.
+On Valkey that recursion runs on the native thread stack (8 MiB by default). On Wasm every Wasm call is a JVM call,
+so the JVM thread stack runs out long before the 8 MiB C stack. The exception (`ChicoryException`) escapes `eval`,
+and the instance is poisoned. Measured on macOS arm64 (the deepest that worked / the shallowest that poisoned):
+
+| Script | 512 KiB | 1 MiB | 2 MiB | Valkey / JNI (8 MiB native stack) |
+|---|---|---|---|---|
+| `cmsgpack.unpack(string.rep('\145', N) .. '\192')` | 1000 / 2000 | 2000 / 3000 | 3000 / — | 3000 returns a table |
+| `string.find(string.rep('a', N), string.rep('a?', N))` | 1000 / 1500 | 3000 / 5000 | 7000 / 10000 | 20000 works |
+
+What a script sees: on Linux x86_64's default 1 MiB, a script of a few KB can poison the instance where Valkey
+returns a result. A larger thread stack raises the depth roughly in proportion. Not fixed: running evals on a
+dedicated large-stack thread would remove it, but it changes `WasmValkeyLua` and how evals interact with virtual
+threads, which this change did not take on. Linux x86_64 was not measured.
+
+The JNI backend is worse here: luajava runs Lua's C code on the thread's native stack, so overflowing it kills the JVM
+(SIGILL). The 250-level `string.gsub` case does so at 512 KiB and passes at 768 KiB and up; the `string.find` case
+at N = 20000 does so at the 2 MiB default and passes at 8 MiB.
 
 ## 8. Chicory caps the Lua heap just under 2 GiB
 
@@ -243,7 +273,8 @@ All probed:
 What a script sees:
 
 - `not enough memory` is an ordinary Lua error: `pcall` can catch it, and `eval` returns `Result(ok=false)`. The
-  instance survives.
+  instance survives, but keeps its grown memory: Wasm memory never shrinks, so the instance holds that `byte[]` (up to
+  ~2 GiB of JVM heap) until it is discarded.
 - Building a string needs more memory than its final length, because `luaL_Buffer` grows its buffer and then copies
   it into the new string. A 1 GiB `string.rep` already fails, so the practical limit for a single string is somewhere
   between 256 MiB and 1 GiB.
@@ -276,6 +307,7 @@ sections 1–4:
 - `tonumberWithBaseIs64Bit`
 - `structUnpackPositionIs64Bit`
 - `cmsgpackUint64AndInt64`
+- `collectgarbageStepSizeIs64Bit`
 
 `stringIndicesBeyond32BitsAreNotTruncated` and `structUnpackPositionIs64Bit` passed on the unpatched build too; they
 guard against a partial patch. Section 7: `nestingRaisesValkeysErrors` (shared) and
