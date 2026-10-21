@@ -15,7 +15,6 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.function.Function;
 
 /** Runs scripts on Valkey's bundled Lua compiled to lua.wasm. Not thread-safe. */
 public final class ValkeyLua {
@@ -24,23 +23,30 @@ public final class ValkeyLua {
 
     private final Instance instance;
 
-    /**
-     * @param redisCall handles redis.call/redis.pcall: receives the command arguments, returns a RESP2 reply
-     */
-    public ValkeyLua(Path wasm, Function<List<byte[]>, byte[]> redisCall) {
+    // Op codes of env.host_call; keep in sync with the enum in valkey_lua.c.
+    private static final int OP_CALL = 0, OP_SETRESP = 1, OP_SET_REPL = 2, OP_LOG = 3, OP_ACL_CHECK_CMD = 4;
+
+    public ValkeyLua(Path wasm, Handler handler) {
         var wasi = WasiPreview1.builder().withOptions(WasiOptions.builder().build()).build();
-        var redis = new HostFunction("env", "redis_call",
-                FunctionType.of(List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of()),
-                // inst is the calling Wasm instance; args are (req_ptr, req_len, out_ptr, out_len) into its memory.
+        var redis = new HostFunction("env", "host_call",
+                FunctionType.of(List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of()),
+                // inst is the calling Wasm instance; args are (op, req_ptr, req_len, out_ptr, out_len) into its memory.
                 (inst, args) -> {
-                    byte[] req = inst.memory().readBytes((int) args[0], (int) args[1]);
-                    byte[] reply = redisCall.apply(parseRequest(req));
+                    byte[] req = inst.memory().readBytes((int) args[1], (int) args[2]);
+                    byte[] reply;
+                    try {
+                        reply = dispatch(handler, (int) args[0], parseRequest(req));
+                    } catch (RuntimeException e) {
+                        String msg = e.getMessage();
+                        msg = msg == null ? e.getClass().getSimpleName() : msg.replace('\r', ' ').replace('\n', ' ');
+                        reply = ("-ERR " + msg + "\r\n").getBytes(StandardCharsets.UTF_8);
+                    }
                     // Copy the reply into a guest-allocated buffer; the C side owns and frees it.
                     int ptr = (int) inst.export("alloc").apply(reply.length)[0];
                     inst.memory().write(ptr, reply);
                     // Wasm has no multi-value return here, so hand back pointer and length via the out-params.
-                    inst.memory().writeI32((int) args[2], ptr);
-                    inst.memory().writeI32((int) args[3], reply.length);
+                    inst.memory().writeI32((int) args[3], ptr);
+                    inst.memory().writeI32((int) args[4], reply.length);
                     return null;
                 });
         var imports = ImportValues.builder().addFunction(wasi.toHostFunctions()).addFunction(redis).build();
@@ -66,6 +72,21 @@ public final class ValkeyLua {
         } finally {
             instance.export("dealloc").apply(ptr);
         }
+    }
+
+    private static byte[] dispatch(Handler h, int op, List<byte[]> args) {
+        return switch (op) {
+            case OP_CALL -> h.call(args);
+            case OP_SETRESP -> h.setResp(Integer.parseInt(str(args.get(0))));
+            case OP_SET_REPL -> h.setRepl(Integer.parseInt(str(args.get(0))));
+            case OP_LOG -> h.log(Integer.parseInt(str(args.get(0))), str(args.get(1)));
+            case OP_ACL_CHECK_CMD -> h.aclCheckCmd(args);
+            default -> throw new IllegalStateException("unknown host op " + op);
+        };
+    }
+
+    private static String str(byte[] b) {
+        return new String(b, StandardCharsets.UTF_8);
     }
 
     /** Parses the RESP2 array of bulk strings built by valkey_lua.c. */

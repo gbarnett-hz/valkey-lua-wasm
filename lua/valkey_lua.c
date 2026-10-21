@@ -24,10 +24,20 @@ int mkstemp(char *template) {
     return -1;
 }
 
-/* Host handles a RESP2 request (array of bulk strings) and writes back a RESP2
- * reply it allocated via the exported alloc; we free it. */
-__attribute__((import_module("env"), import_name("redis_call")))
-extern void host_redis_call(const char *req, size_t req_len, char **reply, size_t *reply_len);
+/* Host operations, all through one import. req is always a RESP2 array of bulk strings;
+ * keep the op codes in sync with ValkeyLua.java. */
+enum { OP_CALL, OP_SETRESP, OP_SET_REPL, OP_LOG, OP_ACL_CHECK_CMD };
+
+/* Host handles the request and writes back a RESP2 reply it allocated via the exported alloc. */
+__attribute__((import_module("env"), import_name("host_call")))
+extern void host_call(int op, const char *req, size_t req_len, char **reply, size_t *reply_len);
+
+/* Returns the malloc'd RESP2 reply; the caller frees it. */
+static char *hostCall(int op, const char *req, size_t req_len, size_t *reply_len) {
+    char *reply;
+    host_call(op, req, req_len, &reply, reply_len);
+    return reply;
+}
 
 /* Pushes one RESP2 reply as Lua, using Redis' RESP2 -> Lua mapping.
  * ponytail: trusts the host to send well-formed RESP; add bounds checks if the reply source becomes untrusted. */
@@ -100,8 +110,7 @@ static int redisGenericCommand(lua_State *L, int raise_error) {
 
     size_t req_len, reply_len;
     const char *req = lua_tolstring(L, -1, &req_len);
-    char *reply;
-    host_redis_call(req, req_len, &reply, &reply_len);
+    char *reply = hostCall(OP_CALL, req, req_len, &reply_len);
     pushReply(L, reply);
     free(reply);
 

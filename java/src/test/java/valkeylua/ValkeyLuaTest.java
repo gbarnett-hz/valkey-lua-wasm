@@ -11,17 +11,25 @@ import org.junit.jupiter.api.Test;
 
 class ValkeyLuaTest {
 
+    static final Path WASM = Path.of("../lua/lua.wasm");
+
     /** Stub redis.call backend: records each command and answers with {@link #reply}. */
     private final List<List<String>> calls = new ArrayList<>();
     private String reply = "+OK\r\n";
 
-    private final ValkeyLua lua = new ValkeyLua(Path.of("../lua/lua.wasm"), args -> {
+    private final ValkeyLua lua = new ValkeyLua(WASM, args -> {
         calls.add(args.stream().map(a -> new String(a, StandardCharsets.UTF_8)).toList());
         return reply.getBytes(StandardCharsets.UTF_8);
     });
 
     private String ok(String script) {
         var r = lua.eval(script);
+        assertTrue(r.ok(), () -> "script failed: " + r.value());
+        return r.value();
+    }
+
+    private static String okOn(ValkeyLua l, String script) {
+        var r = l.eval(script);
         assertTrue(r.ok(), () -> "script failed: " + r.value());
         return r.value();
     }
@@ -114,5 +122,26 @@ class ValkeyLuaTest {
     void syntaxError() {
         var r = lua.eval("return +");
         assertEquals(false, r.ok());
+    }
+
+    @Test
+    void handlerExceptionBecomesScriptErrorAndInstanceSurvives() {
+        var l = new ValkeyLua(WASM, args -> { throw new IllegalStateException("mapping broke"); });
+        var r = l.eval("return redis.call('GET', 'k')");
+        assertEquals(false, r.ok());
+        assertEquals("ERR mapping broke", r.value());
+        assertEquals("ERR mapping broke", okOn(l, "return redis.pcall('GET', 'k').err"));
+    }
+
+    @Test
+    void exceptionMessageWithNewlinesStaysOneError() {
+        var l = new ValkeyLua(WASM, args -> { throw new RuntimeException("a\r\nb"); });
+        assertEquals("ERR a  b", okOn(l, "return redis.pcall('GET', 'k').err"));
+    }
+
+    @Test
+    void exceptionWithoutMessageUsesClassName() {
+        var l = new ValkeyLua(WASM, args -> { throw new NullPointerException(); });
+        assertEquals("ERR NullPointerException", okOn(l, "return redis.pcall('GET', 'k').err"));
     }
 }
