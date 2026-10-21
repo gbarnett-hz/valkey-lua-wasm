@@ -6,25 +6,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
-class ValkeyLuaTest {
+/** The contract both backends must meet; each subclass supplies one. */
+abstract class ValkeyLuaTest {
 
-    static final Path WASM = Path.of("../lua/lua.wasm");
+    abstract ValkeyLua create(Handler handler, ServerInfo info);
+
+    ValkeyLua create(Handler handler) {
+        return create(handler, ServerInfo.DEFAULT);
+    }
 
     /** Stub redis.call backend: records each command and answers with {@link #reply}. */
     private final List<List<String>> calls = new ArrayList<>();
     private String reply = "+OK\r\n";
 
-    private final ValkeyLua lua = new ValkeyLua(WASM, args -> {
+    final ValkeyLua lua = create(args -> {
         calls.add(args.stream().map(a -> new String(a, StandardCharsets.UTF_8)).toList());
         return reply.getBytes(StandardCharsets.UTF_8);
     });
 
-    private String ok(String script) {
+    String ok(String script) {
         var r = lua.eval(script);
         assertTrue(r.ok(), () -> "script failed: " + r.value());
         return r.value();
@@ -212,7 +216,7 @@ class ValkeyLuaTest {
 
     @Test
     void handlerExceptionBecomesScriptErrorAndInstanceSurvives() {
-        var l = new ValkeyLua(WASM, args -> { throw new IllegalStateException("mapping broke"); });
+        var l = create(args -> { throw new IllegalStateException("mapping broke"); });
         var r = l.eval("return redis.call('GET', 'k')");
         assertEquals(false, r.ok());
         assertEquals("ERR mapping broke", r.value());
@@ -221,19 +225,19 @@ class ValkeyLuaTest {
 
     @Test
     void exceptionMessageWithNewlinesStaysOneError() {
-        var l = new ValkeyLua(WASM, args -> { throw new RuntimeException("a\r\nb"); });
+        var l = create(args -> { throw new RuntimeException("a\r\nb"); });
         assertEquals("ERR a  b", okOn(l, "return redis.pcall('GET', 'k').err"));
     }
 
     @Test
     void exceptionWithoutMessageUsesClassName() {
-        var l = new ValkeyLua(WASM, args -> { throw new NullPointerException(); });
+        var l = create(args -> { throw new NullPointerException(); });
         assertEquals("ERR NullPointerException", okOn(l, "return redis.pcall('GET', 'k').err"));
     }
 
     @Test
     void handlerReturningNullIsScriptError() {
-        var l = new ValkeyLua(WASM, args -> null);
+        var l = create(args -> null);
         for (int i = 0; i < 100; i++) {
             assertEquals("ERR handler returned null", okOn(l, "return redis.pcall('GET', 'k').err"));
         }
@@ -242,9 +246,9 @@ class ValkeyLuaTest {
 
     @Test
     void handlerErrorBecomesScriptError() {
-        var l = new ValkeyLua(WASM, args -> { throw new StackOverflowError(); });
+        var l = create(args -> { throw new StackOverflowError(); });
         assertEquals("ERR StackOverflowError", okOn(l, "return redis.pcall('GET', 'k').err"));
-        var l2 = new ValkeyLua(WASM, args -> { throw new AssertionError("bad"); });
+        var l2 = create(args -> { throw new AssertionError("bad"); });
         assertEquals("ERR bad", okOn(l2, "return redis.pcall('GET', 'k').err"));
     }
 
@@ -256,9 +260,22 @@ class ValkeyLuaTest {
     }
 
     @Test
+    void luajavaBridgeIsNotReachableFromScripts() {
+        assertEquals("nil nil", ok("return tostring(java) .. ' ' .. tostring(debug.getregistry()._LOADED.java)"));
+    }
+
+    @Test
+    void failingTostringPoisonsInstance() {
+        // Wasm traps (WasiExitException); JNI throws IllegalStateException rather than let luajava abort the JVM.
+        assertThrows(RuntimeException.class,
+                () -> lua.eval("return setmetatable({}, {__tostring = function() error('no') end})"));
+        assertThrows(IllegalStateException.class, () -> lua.eval("return 1"));
+    }
+
+    @Test
     void binaryCallArgumentsReachHandlerExactly() {
         var got = new ArrayList<byte[]>();
-        var l = new ValkeyLua(WASM, args -> { got.addAll(args); return "+OK\r\n".getBytes(StandardCharsets.UTF_8); });
+        var l = create(args -> { got.addAll(args); return "+OK\r\n".getBytes(StandardCharsets.UTF_8); });
         okOn(l, "return redis.call('SET', 'a\\0b', 'x\\r\\ny').ok");
         assertEquals(3, got.size());
         assertTrue(java.util.Arrays.equals(b("SET"), got.get(0)));
@@ -296,7 +313,7 @@ class ValkeyLuaTest {
         assertEquals("0 1 2 3", ok("return redis.LOG_DEBUG..' '..redis.LOG_VERBOSE..' '..redis.LOG_NOTICE..' '..redis.LOG_WARNING"));
         assertEquals("7.2.4 459268 255.255.255 16777215 valkey", ok(
             "return redis.REDIS_VERSION..' '..redis.REDIS_VERSION_NUM..' '..redis.VALKEY_VERSION..' '..redis.VALKEY_VERSION_NUM..' '..redis.SERVER_NAME"));
-        var custom = new ValkeyLua(WASM, args -> "+OK\r\n".getBytes(StandardCharsets.UTF_8),
+        var custom = create(args -> "+OK\r\n".getBytes(StandardCharsets.UTF_8),
                 new ServerInfo("7.0.1", "8.1.0", "acme"));
         assertEquals("7.0.1 458753 8.1.0 524544 acme", okOn(custom,
             "return redis.REDIS_VERSION..' '..redis.REDIS_VERSION_NUM..' '..redis.VALKEY_VERSION..' '..redis.VALKEY_VERSION_NUM..' '..redis.SERVER_NAME"));
@@ -344,7 +361,7 @@ class ValkeyLuaTest {
     @Test
     void perEvalResetPrecedesScript() {
         var h = new RecordingHandler();
-        okOn(new ValkeyLua(WASM, h), "return redis.call('GET', 'k')");
+        okOn(create(h), "return redis.call('GET', 'k')");
         assertEquals(List.of("setResp 2", "setRepl 3", "call GET k"), h.ops);
     }
 
@@ -352,7 +369,7 @@ class ValkeyLuaTest {
     void resetErrorFailsEvalWithoutRunningScript() {
         var h = new RecordingHandler();
         h.setReplReply = "-ERR no replication here\r\n";
-        var r = new ValkeyLua(WASM, h).eval("return redis.call('GET', 'k')");
+        var r = create(h).eval("return redis.call('GET', 'k')");
         assertEquals(false, r.ok());
         assertEquals("ERR no replication here", r.value());
         assertEquals(List.of("setResp 2", "setRepl 3"), h.ops);
@@ -361,7 +378,7 @@ class ValkeyLuaTest {
     @Test
     void resetRunsEvenAfterFailedEval() {
         var h = new RecordingHandler();
-        var l = new ValkeyLua(WASM, h);
+        var l = create(h);
         l.eval("redis.set_repl(redis.REPL_NONE) error('boom')");
         h.ops.clear();
         okOn(l, "return 1");
@@ -371,7 +388,7 @@ class ValkeyLuaTest {
     @Test
     void setresp() {
         var h = new RecordingHandler();
-        var l = new ValkeyLua(WASM, h);
+        var l = create(h);
         assertEquals("0", okOn(l, "return select('#', redis.setresp(2))"));
         assertEquals("ERR RESP3 is not supported", l.eval("redis.setresp(3)").value());
         assertEquals("ERR RESP version must be 2 or 3.", l.eval("redis.setresp(4)").value());
@@ -383,7 +400,7 @@ class ValkeyLuaTest {
     @Test
     void setRepl() {
         var h = new RecordingHandler();
-        var l = new ValkeyLua(WASM, h);
+        var l = create(h);
         okOn(l, "redis.set_repl(redis.REPL_AOF) return 1");
         assertTrue(h.ops.contains("setRepl 1"), h.ops.toString());
         assertEquals("ERR Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.",
@@ -394,7 +411,7 @@ class ValkeyLuaTest {
     @Test
     void log() {
         var h = new RecordingHandler();
-        var l = new ValkeyLua(WASM, h);
+        var l = create(h);
         okOn(l, "redis.log(redis.LOG_NOTICE, 'a', 'b', 3) return 1");
         assertTrue(h.ops.contains("log 2 a b 3"), h.ops.toString());
         assertEquals("ERR server.log() requires two arguments or more.", l.eval("redis.log(1)").value());
@@ -405,7 +422,7 @@ class ValkeyLuaTest {
     @Test
     void aclCheckCmd() {
         var h = new RecordingHandler();
-        var l = new ValkeyLua(WASM, h);
+        var l = create(h);
         assertEquals("true", okOn(l, "return tostring(redis.acl_check_cmd('GET', 'k'))"));
         h.aclReply = ":0\r\n";
         assertEquals("false", okOn(l, "return tostring(redis.acl_check_cmd('GET', 'k'))"));
@@ -421,6 +438,40 @@ class ValkeyLuaTest {
         assertEquals("75 13", ok("math.randomseed(42) return math.random(100) .. ' ' .. math.random(10, 20)"));
         // luaL_error from a C function: luaL_where(1) prefixes the calling script's position; no ERR prefix.
         assertEquals("user_script:1: wrong number of arguments", lua.eval("return math.random(1, 2, 3)").value());
+    }
+
+    /*
+     * Valkey runs on 64-bit hosts, where lua_Integer (ptrdiff_t), C long and size_t are 64-bit. lua.wasm is wasm32,
+     * where they are 32-bit: WasmValkeyLuaTest overrides the first three with what lua.wasm returns. The last passes
+     * on lua.wasm only because wasm32 saturates out-of-range casts, and fails if LUA_INTEGER alone is widened.
+     * Expected values are 64-bit Valkey's.
+     */
+
+    @Test
+    void stringFormatIntegersAre64Bit() {
+        assertEquals("1099511627776|-2147483649|10000000000|200000000|400000000000|4294967296",
+            ok("return string.format('%d|%i|%x|%X|%o|%u', 2^40, -2^31-1, 2^40, 2^33, 2^35, 2^32)"));
+    }
+
+    @Test
+    void structLongAndSizeTAre64Bit() {
+        assertEquals("8 8 8 4", ok("return struct.size('l')..' '..struct.size('L')..' '..struct.size('T')..' '..struct.size('i')"));
+        assertEquals("1099511627776", ok("return struct.unpack('>l', struct.pack('>l', 2^40))"));
+        assertEquals("1099511627776", ok("return struct.unpack('<i8', struct.pack('<i8', 2^40))"));
+    }
+
+    @Test
+    void intArgumentsKeepLow32BitsOf64BitInteger() {
+        // luaL_checkint is (int)(lua_Integer)d: 2^40 -> 0, 2^31 -> -2^31. wasm32 saturates to INT_MAX instead.
+        assertEquals("user_script:1: bad argument #1 to 'random' (interval is empty)", lua.eval("return math.random(2^40)").value());
+        assertEquals("true", ok("math.randomseed(2^40) local a = math.random(100) math.randomseed(0) return tostring(a == math.random(100))"));
+        assertEquals("0", ok("return select('#', unpack({}, 1, 2^31))"));
+    }
+
+    @Test
+    void stringIndicesBeyond32BitsAreNotTruncated() {
+        assertEquals("|abcdef", ok("return string.sub('abcdef', 2^32 + 2, 2^32 + 3) .. '|' .. string.sub('abcdef', -2^32)"));
+        assertEquals("0", ok("return select('#', string.byte('abc', 2^32 + 1))"));
     }
 
     private static byte[] b(String s) {
@@ -468,7 +519,7 @@ class ValkeyLuaTest {
                     return ("-ERR unknown command '" + cmd + "'\r\n").getBytes();
             }
         };
-        var vl = new ValkeyLua(WASM, handler);
+        var vl = create(handler);
         var r = vl.eval("redis.call('SET', KEYS[1], ARGV[1]); return redis.call('GET', KEYS[1])",
                 List.of("k".getBytes()), List.of("v".getBytes()));
         assertEquals(new ValkeyLua.Result(true, "v"), r);
