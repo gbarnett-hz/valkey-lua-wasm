@@ -1,4 +1,7 @@
-# Where `lua.wasm` is 32-bit and Valkey is 64-bit
+# Where `lua.wasm` differs from Valkey
+
+Sections 1–6 come from wasm32's 32-bit types; sections 7–8 come from how `lua.wasm` is built and run (C stack size,
+Chicory's memory limit).
 
 Valkey runs on 64-bit hosts (x86_64, arm64), where `ptrdiff_t`, `long`, `unsigned long`, `size_t` and pointers are
 64-bit. `lua.wasm` is built for wasm32, where all of them are 32-bit. Valkey's bundled Lua 5.1 (`deps/lua`) and its
@@ -14,8 +17,8 @@ behaves as Valkey does. It is the reference in the tables below.
 2. Ran a probe script for each candidate on `WasmValkeyLua` and `JniValkeyLua` in the same JVM (`main` at `e50a879`)
    and compared the results.
 
-Every row marked "probed" below was observed. The 4 GiB limit (section 5) comes from the types alone and was not
-probed, because exhausting memory hangs the run.
+Every row marked "probed" below was observed. The 4 GiB limit (section 5) comes from the types alone; in practice
+Chicory caps memory lower, at just under 2 GiB (section 8, probed).
 
 `lua_Number` is a 64-bit `double` on both, so plain arithmetic, `tostring` of numbers, cjson, cmsgpack values and the
 formatting of `redis.call` arguments are identical. Only the integer conversions and C types below differ.
@@ -89,7 +92,8 @@ never runs. Both give `549755813887` and `1099511627776` (probed).
 - **Memory ceiling (from the types, not probed):** the whole Lua heap, every string length (`size_t`) and the
   garbage collector's byte counters (`lu_mem`/`l_mem`) fit in wasm32's 4 GiB address space, minus everything else in
   the instance. Valkey has no such limit, and `maxmemory` does not apply to Lua. On wasm, a script that approaches
-  the limit fails with an out-of-memory error where Valkey would carry on.
+  the limit fails with an out-of-memory error where Valkey would carry on. Chicory's own limit is lower and is
+  reached first; see section 8.
 
 ## 6. Fixing it in the Wasm build
 
@@ -116,11 +120,82 @@ JNI for `string.format` (section 2), `struct` (section 3), `math.random`, `math.
 - The newer rows of section 1 (`string.rep`, `string.char`, `table.insert`, `select`, `cmsgpack.unpack_one`) should
   follow a 64-bit `LUA_INTEGER`, but were not run against the patched build.
 
-### Only wasm64 fixes everything
+### Only wasm64 fixes everything, and it is not available
 
 The string-position cases, the address width and the 4 GiB ceiling all come from `ptrdiff_t`, `size_t` and pointer
-width. Building for wasm64 (memory64) is the only change that removes every 32-bit type. Whether Chicory supports
-memory64 has not been checked.
+width. Building for wasm64 (memory64) is the only change that removes every 32-bit type. Neither toolchain supports
+it today (checked):
+
+- **Chicory 1.7.5** (the latest release on Maven Central, March 2026) rejects memory64 modules. A one-function wasm64
+  module built with wasi-sdk's clang (`--target=wasm64-unknown-unknown`) fails in `Parser.parse` with
+  `MalformedException: integer too large, invalid memory limit: 4` (flag 4 marks a 64-bit memory). `MemoryLimits`
+  holds page counts as `int`, capped at 65536 pages.
+- **wasi-sdk 34** ships sysroots only for `wasm32-wasip1`, `wasm32-wasip1-threads`, `wasm32-wasip2` and
+  `wasm32-wasip3`. There is no wasm64 libc, so Lua cannot be built for `wasm64-wasip1`.
+
+So the Wasm backend stays wasm32. The patches above, plus `lstrlib.c` positions widened to 64-bit, fix every
+observable integer difference; the remaining `size_t`/pointer width shows only through the memory ceiling (section 8)
+and `tostring` addresses (section 5).
+
+## 7. The C stack is 64 KiB, so deep nesting traps instead of raising Valkey's error
+
+`lua.wasm` is linked with wasm-ld's default 64 KiB C stack (`__stack_pointer` starts at 65536). Valkey runs on a native
+thread stack (megabytes), so its own nesting limits fire first: cjson's 1000-level limit and Lua's `LUAI_MAXCCALLS`
+(200), which raises `C stack overflow`. On wasm the C stack runs out before those limits are reached.
+
+All probed:
+
+| Script | Valkey / JNI | Wasm |
+|---|---|---|
+| `cjson.encode` of a table nested 800 deep | succeeds | succeeds |
+| `cjson.encode` of a table nested 1000 deep | error `Cannot serialise, excessive nesting (1001)` | trap: `WasmRuntimeException: out of bounds memory access: attempted to access address: -376` |
+| `cjson.decode(string.rep('[', 2000) .. string.rep(']', 2000))` | error `Found too many nested data structures (1001) at character 1001` | trap (address -48) |
+| `string.gsub` with a callback that recurses through `string.gsub`, 195 levels | `'y'` | trap (address -224) |
+| the same, 250 levels | error `C stack overflow` | trap (address -224) |
+
+What a script sees:
+
+- The trap is not a Lua error. `pcall` cannot catch it, and `eval` does not return `Result(ok=false)`.
+- It escapes `eval` as a `WasmRuntimeException`, and the instance is poisoned: every later `eval` throws
+  `IllegalStateException`.
+- Any script can trigger it in a few lines.
+
+The stack is placed at the bottom of linear memory, so an overflow runs below address 0 and traps. It does not
+overwrite the heap.
+
+These matched on both backends (probed): Lua-to-Lua recursion (15000 levels succeeds, 200000 raises `stack overflow`),
+`pcall` recursing until `C stack overflow`, `cmsgpack.pack` and `cmsgpack.unpack` nested 2000–3000 deep, an
+`__index` chain 190 deep, a `string.find` pattern nested 5000 deep, and the parser's nesting limit
+(`loadstring` of 300 nested parentheses).
+
+**Fix (not yet tried):** link with a larger stack, e.g. `-Wl,-z,stack-size=8388608` (8 MiB, the usual native thread
+stack size). Valkey's own limits should then fire first and give the same errors.
+
+## 8. Chicory caps the Lua heap just under 2 GiB
+
+Chicory's `Memory.RUNTIME_MAX_PAGES` is 32767 pages of 64 KiB (backed by a single Java `byte[]`), so a `lua.wasm`
+instance can never use more than 2 GiB − 64 KiB of memory. That covers the whole Lua heap, the C stack and the static
+data. `lua.wasm` starts with 2 pages and declares no maximum, so Chicory's cap is the only one. Valkey has no
+Lua-specific limit, and `maxmemory` does not apply to Lua.
+
+All probed:
+
+| Script | Valkey / JNI | Wasm |
+|---|---|---|
+| `#string.rep('x', 2^28)` (256 MiB) | `268435456` | `268435456` |
+| `#string.rep('x', 2^30)` (1 GiB) | `1073741824` | error `not enough memory` |
+| four `string.rep('x', 2^29)` strings concatenated (2 GiB) | `2147483648` | error `not enough memory` |
+| a table filled with 2^25 integers | `33554432` | `33554432` |
+
+What a script sees:
+
+- `not enough memory` is an ordinary Lua error: `pcall` can catch it, and `eval` returns `Result(ok=false)`. The
+  instance survives.
+- Building a string needs more memory than its final length, because `luaL_Buffer` grows its buffer and then copies
+  it into the new string. A 1 GiB `string.rep` already fails, so the practical limit for a single string is somewhere
+  between 256 MiB and 1 GiB.
+
+This cannot be fixed in the build. A wasm32 module can address at most 4 GiB, and Chicory does not go past 2 GiB.
 
 ## Tests
 
@@ -134,4 +209,5 @@ memory64 has not been checked.
 `WasmValkeyLuaTest` overrides the first three to assert the current 32-bit results. A fix to the Wasm build should
 delete those overrides, so the Valkey expectations apply to both backends. The last test passes on unpatched wasm by
 accident and fails on the partially patched build, so it guards against that regression. Section 4 and the newer
-rows of section 1 have no tests yet.
+rows of section 1 have no tests yet. Neither do sections 7 and 8. Shared tests for the section 7 nesting errors would
+fail on wasm until the stack is enlarged. Section 8 needs a Wasm-only test, because a 1 GiB string succeeds on JNI.

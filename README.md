@@ -34,7 +34,6 @@ Both backends run each `eval` in a fresh `lua_State` and are not thread-safe. Th
   (`-mllvm -wasm-enable-sjlj -lsetjmp -mllvm -wasm-use-legacy-eh=false`). Chicory rejects the legacy EH opcodes, so the last flag is required.
 - Runs on Chicory's runtime compiler (`lua.wasm` → JVM bytecode at instantiation), not the default interpreter.
 - The module exports `eval(src_ptr, src_len, kv_ptr, kv_len) -> status` and `result_ptr`/`result_len`.
-- `os.tmpname` always errors (WASI has no temp dirs).
 
 ## JNI backend
 

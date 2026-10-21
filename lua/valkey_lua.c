@@ -27,7 +27,7 @@ static void loadLib(lua_State *L, const char *name, lua_CFunction f) {
     lua_call(L, 1, 0);
 }
 
-/* WASI has no temp dirs, so wasi-libc omits mkstemp; os.tmpname errors instead. */
+/* wasi-libc omits mkstemp, which loslib.c's os_tmpname references. Valkey only registers os.clock, so it never runs. */
 int mkstemp(char *template) {
     (void)template;
     return -1;
