@@ -5,6 +5,7 @@ POC: Valkey's bundled Lua 5.1 (`deps/lua/src`, with cjson, cmsgpack, struct and 
 ```sh
 make -C lua          # downloads wasi-sdk 34 + pinned Valkey sources, builds lua/lua.wasm
 make -C lua clean    # removes lua/lua.wasm (keeps the downloaded .deps)
+rm -rf lua/.deps/valkey  # after pulling a change to the pinned Valkey sources; the extract rule won't refresh it
 cd java && mvn test  # loads lua.wasm in Chicory and runs scripts against each library
 ```
 
@@ -30,7 +31,8 @@ Ported from Valkey's `script_lua.c`, so argument checks and error strings match 
 - Global patches: `pcall` is Valkey's `luaRedisPcall` wrapper (`{err=}` tables become strings); `math.random` and
   `math.randomseed` use Valkey's PRNG, so sequences match Valkey for the same seed.
 - `KEYS` and `ARGV` are set from `eval(script, keys, args)` before the script runs.
-- Uncaught errors from Lua C functions carry the script position, e.g. `user_script:1: wrong number of arguments`.
+- Uncaught `luaL_error`/`luaL_check*` errors from Lua C functions carry the script position, e.g.
+  `user_script:1: wrong number of arguments`; errors raised as `{err=...}` tables (e.g. `ERR RESP version must be 2 or 3.`) do not.
 
 ## What is delegated to the Handler
 
@@ -49,7 +51,7 @@ bulk strings and the reply is RESP2.
 
 ```java
 public interface Handler {
-    byte[] call(List<byte[]> args);                        // RESP2 reply; a thrown RuntimeException becomes -ERR <message>
+    byte[] call(List<byte[]> args);                        // RESP2 reply; anything thrown becomes -ERR <message>
     default byte[] setResp(int version) { ... }            // default: +OK for 2, -ERR RESP3 is not supported otherwise
     default byte[] setRepl(int flags) { ... }              // default: +OK (ignored)
     default byte[] log(int level, String message) { ... }  // default: +OK (dropped)
@@ -78,7 +80,7 @@ Handler handler = args -> {
             return "+OK\r\n".getBytes();
         case "GET":
             String v = store.get(new String(args.get(1)));
-            return v == null ? "$-1\r\n".getBytes() : ("$" + v.length() + "\r\n" + v + "\r\n").getBytes();
+            return v == null ? "$-1\r\n".getBytes() : ("$" + v.getBytes(UTF_8).length + "\r\n" + v + "\r\n").getBytes(UTF_8);
         default:
             return ("-ERR unknown command '" + cmd + "'\r\n").getBytes();
     }
@@ -117,7 +119,9 @@ The other delegated operations:
 `aclCheckCmd` or `:5` from `setResp`, the module raises `{err="ERR unexpected reply from handler for <fn>"}`
 (`<fn>` = the Lua function name, e.g. `server.acl_check_cmd`). This is a broken handler, treated like a thrown
 exception, never a silently wrong value. An error reply is never "wrong type": it follows the Errors rules.
-`call`/`pcall` accept any well-formed RESP2 reply.
+`call`/`pcall` accept any well-formed RESP2 reply (arrays nested at most 256 deep, Valkey's
+`MAX_NESTED_COLLECTIONS_DEPTH`; nothing after the reply); anything else raises
+`ERR unexpected reply from handler for server.call`.
 
 ### Errors
 
@@ -151,6 +155,8 @@ exception, never a silently wrong value. An error reply is never "wrong type": i
      Valkey would leave it alone because `errno` wouldn't match.
    - As in Valkey, every error table produced by `call`/`pcall` also carries `ignore_error_stats_update = true`.
    - The rewrites apply to `call`/`pcall` replies only, not to the other delegated operations.
+   - A handler exception's message goes through the same rewrites (rule 6 turns it into `-ERR <message>` first), so
+     `throw new RuntimeException("unknown command 'x'")` reaches the script as `ERR Unknown command called from script`.
 5. **A nested error fails the whole call** (Valkey's `call_ctx->error`, `script_lua.c:1200`). If an error appears
    anywhere in a `call`/`pcall` reply, including inside an array (e.g. an `EXEC` reply with a failed command):
    - each error element becomes `{err=..., ignore_error_stats_update=true}` in place;
@@ -159,9 +165,12 @@ exception, never a silently wrong value. An error reply is never "wrong type": i
    - `redis.pcall` returns the whole converted reply.
    Pinned by `nestedErrorFailsWholeCall`; not yet checked against a real Valkey, and if Valkey behaves differently,
    Valkey wins.
-6. **`ValkeyLua` catches any `RuntimeException`** thrown by a handler and turns it into `-ERR <message>`, so a buggy
-   mapping becomes a script error instead of unwinding past Lua. (A Java exception unwinding out of a Wasm host
-   call skips `lua_close` and leaks the `lua_State`. Instance survival is tested by `handlerExceptionBecomesScriptErrorAndInstanceSurvives`; the leak itself is believed, not tested. An `Error` such as `StackOverflowError` still escapes.)
+6. **`ValkeyLua` catches anything a handler throws** (any `Throwable`, including `Error`s such as
+   `StackOverflowError`) and turns it into `-ERR <message>` (CR/LF become spaces; the class's simple name if there is
+   no message), so a buggy mapping becomes a script error instead of unwinding past Lua. A handler returning `null`
+   becomes `-ERR handler returned null`. If anything still escapes `eval` (e.g. Chicory's own call-stack limit), the
+   Wasm stack is left unrestored, so that `eval` rethrows and the instance is poisoned: every later `eval` throws
+   `IllegalStateException`; create a new `ValkeyLua`.
 7. Uncaught Lua errors end `eval` with `Result(ok=false, message)`, where message is the error table's `err`
    field (current behaviour, unchanged).
 

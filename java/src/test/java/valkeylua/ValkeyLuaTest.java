@@ -3,6 +3,7 @@ package valkeylua;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -462,7 +463,7 @@ class ValkeyLuaTest {
                     return "+OK\r\n".getBytes();
                 case "GET":
                     String v = store.get(new String(args.get(1)));
-                    return v == null ? "$-1\r\n".getBytes() : ("$" + v.length() + "\r\n" + v + "\r\n").getBytes();
+                    return v == null ? "$-1\r\n".getBytes() : ("$" + v.getBytes(UTF_8).length + "\r\n" + v + "\r\n").getBytes(UTF_8);
                 default:
                     return ("-ERR unknown command '" + cmd + "'\r\n").getBytes();
             }
@@ -472,5 +473,8 @@ class ValkeyLuaTest {
                 List.of("k".getBytes()), List.of("v".getBytes()));
         assertEquals(new ValkeyLua.Result(true, "v"), r);
         assertEquals(false, vl.eval("return redis.call('NOPE')").ok());
+        // Not in the README: the bulk length must be in bytes for non-ASCII values.
+        assertEquals(new ValkeyLua.Result(true, "\u00e9"), vl.eval("redis.call('SET', 'k', ARGV[1]); return redis.call('GET', 'k')",
+                List.of(), List.of("\u00e9".getBytes(UTF_8))));
     }
 }
