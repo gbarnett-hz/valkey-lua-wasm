@@ -1,0 +1,22 @@
+--- a/deps/lua/src/lua_struct.c
++++ b/deps/lua/src/lua_struct.c
+@@ -112,8 +112,8 @@
+   switch (opt) {
+     case 'B': case 'b': return sizeof(char);
+     case 'H': case 'h': return sizeof(short);
+-    case 'L': case 'l': return sizeof(long);
+-    case 'T': return sizeof(size_t);
++    case 'L': case 'l': return sizeof(long long);  /* wasm32: sizeof(long) on Valkey's 64-bit hosts */
++    case 'T': return sizeof(long long);  /* sizeof(size_t) there */
+     case 'f':  return sizeof(float);
+     case 'd':  return sizeof(double);
+     case 'x': return 1;
+@@ -295,7 +295,7 @@
+   const char *fmt = luaL_checkstring(L, 1);
+   size_t ld;
+   const char *data = luaL_checklstring(L, 2, &ld);
+-  size_t pos = luaL_optinteger(L, 3, 1);
++  unsigned long long pos = luaL_optinteger(L, 3, 1);  /* wasm32: size_t on Valkey's 64-bit hosts */
+   luaL_argcheck(L, pos > 0, 3, "offset must be 1 or greater");
+   pos--; /* Lua indexes are 1-based, but here we want 0-based for C
+           * pointer math. */

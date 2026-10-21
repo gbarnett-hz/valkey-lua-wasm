@@ -8,11 +8,11 @@ API delegated to a `Handler`. Two backends behind one API (`ValkeyLua`) and one 
 | Lua | compiled to wasm32 (`lua/lua.wasm`), run on [Chicory](https://github.com/dylibso/chicory) | native, through [luajava](https://github.com/gudzpoz/luajava) (JNI), as Infinispan does |
 | `server.*` API | C (`lua/valkey_lua.c`) inside the module | Java `JFunction`s, a port of `valkey_lua.c` against the raw Lua C API |
 | Isolation | Wasm sandbox; nothing native | native code in the JVM; a Lua panic would kill the JVM (guarded, see below) |
-| Integer width | 32-bit (`long`, `size_t`, `lua_Integer`) | 64-bit, as Valkey |
+| Integer width | 64-bit, as Valkey (patched; pointers and `size_t` stay 32-bit) | 64-bit, as Valkey |
 | Build | wasi-sdk | host C/C++ compiler, JNI headers |
 | Construct | `new WasmValkeyLua(Path wasm, handler[, info])` | `new JniValkeyLua(handler[, info])` |
 
-The JNI backend matches Valkey more closely; see [Where the backends differ](#where-the-backends-differ).
+Both give 64-bit Valkey's results; the few remaining differences are in [Where the backends differ](#where-the-backends-differ).
 
 ```sh
 make -C lua            # downloads wasi-sdk 34 + pinned Valkey sources, builds lua/lua.wasm
@@ -20,8 +20,9 @@ make -C native         # downloads luajava's JNI glue + pinned Valkey sources, b
 cd java && mvn test    # runs ValkeyLuaTest against both backends (WasmValkeyLuaTest, JniValkeyLuaTest)
 ```
 
-`make -C lua clean` / `make -C native clean` remove the build outputs and keep the downloaded `.deps`. After pulling a
-change to the pinned Valkey sources, `rm -rf lua/.deps/valkey native/.deps/valkey`; the extract rules won't refresh them.
+`make -C lua clean` / `make -C native clean` remove the build outputs and keep the downloaded `.deps`. `make -C lua`
+re-extracts Valkey's sources by itself when `VALKEY_SHA` or a file in `lua/patches/` changes. `native/` doesn't: after
+changing its pinned Valkey sources, `rm -rf native/.deps/valkey`.
 On macOS 27 Command Line Tools, clang++ may not find libc++ headers; pass
 `CXXFLAGS="-isystem $(xcrun --show-sdk-path)/usr/include/c++/v1"` to `make -C native`.
 
@@ -34,6 +35,9 @@ Both backends run each `eval` in a fresh `lua_State` and are not thread-safe. Th
   (`-mllvm -wasm-enable-sjlj -lsetjmp -mllvm -wasm-use-legacy-eh=false`). Chicory rejects the legacy EH opcodes, so the last flag is required.
 - Runs on Chicory's runtime compiler (`lua.wasm` → JVM bytecode at instantiation), not the default interpreter.
 - The module exports `eval(src_ptr, src_len, kv_ptr, kv_len) -> status` and `result_ptr`/`result_len`.
+- 64-bit integers, as on Valkey: `-DLUA_USELONGLONG`, `-DSTRUCT_INT='long long'` and five patches in `lua/patches/`
+  (`luaconf.h`, `lua_struct.c`, `lbaselib.c`, `lstrlib.c`, `lua_cmsgpack.c`), applied with `patch -F 0` so one that
+  no longer applies exactly fails the build. What each fixes is in [wasm-difference.md](wasm-difference.md).
 
 ## JNI backend
 
@@ -67,33 +71,14 @@ JNI-specific hazards handled in `JniValkeyLua`:
 
 ## Where the backends differ
 
-Found by diffing ~90 probe scripts between the two backends. The shared tests after the comment "Valkey runs on
-64-bit hosts" in `ValkeyLuaTest` expect Valkey's values; `WasmValkeyLuaTest` overrides three of them with what
-`lua.wasm` returns. All have one cause: Valkey runs on 64-bit hosts, while `lua.wasm` is wasm32, so `lua_Integer`
-(`ptrdiff_t`), C `long` and `size_t` are 32-bit there. Everything else matched, including cjson, cmsgpack, number
-formatting of call arguments and every error message probed.
+Found by diffing probe scripts between the two backends; [wasm-difference.md](wasm-difference.md) has every case, the
+fix for each and its test. `lua.wasm` is wasm32, so `lua_Integer`, `long` and `size_t` were 32-bit; the patches above
+make every value derived from a Lua integer 64-bit, and the shared tests after the comment "Valkey runs on 64-bit
+hosts" in `ValkeyLuaTest` pin Valkey's values on both backends. What remains:
 
 | Script | Valkey and JNI | Wasm |
 |---|---|---|
-| `string.format('%d', 2^40)` (also `%i %x %X %o %u`) | `1099511627776` | `2147483647` (truncated through 32-bit `long`) |
-| `struct.size('l')`, `'L'`, `'T'` | `8` | `4` |
-| `struct.unpack('>l', struct.pack('>l', 2^40))`, same with `'<i8'` | `1099511627776` | `-1` (packed through 32-bit `long`) |
-| `math.random(2^40)` | error `interval is empty` (`(int)(int64)2^40` is 0) | a random number (the cast saturates to `INT_MAX`) |
-| `math.randomseed(2^40)` | same sequence as `randomseed(0)` | seeds with `INT_MAX` |
-| `select('#', unpack({}, 1, 2^31))` | `0` | error `too many results to unpack` |
 | escape from `eval` (failing `__tostring`) | `IllegalStateException` | Chicory trap (`WasiExitException`) |
-
-Rebuilding `lua.wasm` with the following passes the shared tests and fixes the first six rows:
-
-- `-DLUA_USELONGLONG` (`luaconf.h` switch: `string.format` uses `%lld`/`long long`).
-- `-DSTRUCT_INT='long long'` (`lua_struct.c` guards it with `#ifndef`).
-- Patch `luaconf.h`: `#define LUA_INTEGER long long` (unconditional, so `-D` can't override it).
-- Patch `lua_struct.c` `optsize`: `'l'`/`'L'`/`'T'` return `sizeof(long long)`.
-
-That build still differs from Valkey for string indices of 2^32 and above: `string.sub`, `string.byte` and others
-hold indices in `ptrdiff_t`, which is still 32-bit, so `string.sub('abcdef', 2^32 + 2, 2^32 + 3)` returns `"bc"`
-instead of `""`. The current `lua.wasm` happens to get these right because the cast saturates; the shared test
-`stringIndicesBeyond32BitsAreNotTruncated` catches the regression. Only wasm64 removes the 32-bit types entirely.
 
 Not differences: the `os` library has only `os.clock` in both (Valkey's `loslib.c`), and `tostring` of tables and
 functions prints 64-bit addresses on JNI (cosmetic).

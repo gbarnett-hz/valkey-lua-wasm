@@ -442,9 +442,8 @@ abstract class ValkeyLuaTest {
 
     /*
      * Valkey runs on 64-bit hosts, where lua_Integer (ptrdiff_t), C long and size_t are 64-bit. lua.wasm is wasm32,
-     * where they are 32-bit: WasmValkeyLuaTest overrides the first three with what lua.wasm returns. The last passes
-     * on lua.wasm only because wasm32 saturates out-of-range casts, and fails if LUA_INTEGER alone is widened.
-     * Expected values are 64-bit Valkey's.
+     * patched (lua/patches) so that every value derived from a Lua integer is 64-bit too. These pin 64-bit Valkey's
+     * values on both backends; see wasm-difference.md.
      */
 
     @Test
@@ -472,6 +471,45 @@ abstract class ValkeyLuaTest {
     void stringIndicesBeyond32BitsAreNotTruncated() {
         assertEquals("|abcdef", ok("return string.sub('abcdef', 2^32 + 2, 2^32 + 3) .. '|' .. string.sub('abcdef', -2^32)"));
         assertEquals("0", ok("return select('#', string.byte('abc', 2^32 + 1))"));
+    }
+
+    @Test
+    void largeIntegerArgumentsKeepLow32Bits() {
+        assertEquals("true", ok("math.randomseed(2^32 + 5) local a = math.random(1000) math.randomseed(5) return tostring(a == math.random(1000))"));
+        assertEquals("xxx", ok("return string.rep('x', 2^32 + 3)"));
+        assertEquals("A", ok("return string.char(65 + 2^32)"));
+        assertEquals("x", ok("local t = {} table.insert(t, 2^32 + 1, 'x') return tostring(t[1])"));
+        assertEquals("b", ok("return select(2^32 + 2, 'a', 'b')"));
+        assertEquals("user_script:1: Start offset 1 greater than input length 2.",
+            lua.eval("return cmsgpack.unpack_one(cmsgpack.pack(1, 2), 2^32 + 1)").value());
+    }
+
+    @Test
+    void tonumberWithBaseIs64Bit() {
+        assertEquals("1099511627775 78364164095", ok("return tonumber('ffffffffff', 16) .. ' ' .. tonumber('zzzzzzz', 36)"));
+        // Already matched before the patches (strtod parses hex); guards the coercion path.
+        assertEquals("549755813887 1099511627776", ok("return 0x7fffffffff .. ' ' .. ('0x10000000000' + 0)"));
+    }
+
+    @Test
+    void structUnpackPositionIs64Bit() {
+        // Matched before the patches only because wasm32 saturated; a 32-bit size_t pos would truncate 2^32 + 1 to 1.
+        assertEquals("user_script:1: bad argument #2 to 'unpack' (data string too short)",
+            lua.eval("return struct.unpack('b', 'abc', 2^32 + 1)").value());
+        assertEquals("user_script:1: bad argument #2 to 'unpack' (data string too short)",
+            lua.eval("return struct.unpack('b', 'abc', -1)").value());
+        assertEquals("user_script:1: bad argument #3 to 'unpack' (offset must be 1 or greater)",
+            lua.eval("return struct.unpack('b', 'abc', 0)").value());
+        assertEquals("98", ok("return struct.unpack('b', 'abc', 2)"));
+    }
+
+    @Test
+    void cmsgpackUint64AndInt64() {
+        assertEquals("-1", ok("return tostring(cmsgpack.unpack('\\207' .. string.rep('\\255', 8)))"));
+        // Encoding already matched; guards the path BITS_32=0 switches to lua_tointeger.
+        assertEquals("cf0000010000000000 d3ffffff0000000000 -1099511627776", ok(
+            "local function hex(b) local h = '' for i=1,#b do h = h .. string.format('%02x', b:byte(i)) end return h end "
+            + "return hex(cmsgpack.pack(2^40)) .. ' ' .. hex(cmsgpack.pack(-2^40)) .. ' ' .. tostring(cmsgpack.unpack(cmsgpack.pack(-2^40)))"));
     }
 
     private static byte[] b(String s) {

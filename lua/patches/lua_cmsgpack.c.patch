@@ -1,0 +1,17 @@
+--- a/deps/lua/src/lua_cmsgpack.c
++++ b/deps/lua/src/lua_cmsgpack.c
+@@ -24,12 +24,8 @@
+ #define IS_INT64_EQUIVALENT(x) IS_INT_TYPE_EQUIVALENT(x, int64_t)
+ #define IS_INT_EQUIVALENT(x) IS_INT_TYPE_EQUIVALENT(x, int)
+ 
+-/* If size of pointer is equal to a 4 byte integer, we're on 32 bits. */
+-#if UINTPTR_MAX == UINT_MAX
+-    #define BITS_32 1
+-#else
+-    #define BITS_32 0
+-#endif
++/* wasm32: lua_Integer is 64-bit, as on Valkey's 64-bit hosts, so take the 64-bit path regardless of pointer size. */
++#define BITS_32 0
+ 
+ #if BITS_32
+     #define lua_pushunsigned(L, n) lua_pushnumber(L, n)

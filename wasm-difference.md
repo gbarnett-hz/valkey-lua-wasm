@@ -3,6 +3,10 @@
 Sections 1–6 come from wasm32's 32-bit types; sections 7–8 come from how `lua.wasm` is built and run (C stack size,
 Chicory's memory limit).
 
+**Status:** sections 1–4 are fixed. `lua/Makefile` applies the patches in `lua/patches/` and two compile switches
+(section 6), so every value derived from a Lua integer is 64-bit, as on Valkey. The "Wasm" columns in those sections
+show the unpatched build, for the record.
+
 Valkey runs on 64-bit hosts (x86_64, arm64), where `ptrdiff_t`, `long`, `unsigned long`, `size_t` and pointers are
 64-bit. `lua.wasm` is built for wasm32, where all of them are 32-bit. Valkey's bundled Lua 5.1 (`deps/lua`) and its
 libraries use these types in a few places, so some scripts give different results on the Wasm backend than on Valkey.
@@ -33,9 +37,13 @@ library functions then cast that to `int`.
 - **wasm32:** the double is converted straight to a 32-bit `ptrdiff_t`, and the conversion saturates, so any value of
   2^31 or more becomes 2147483647.
 
+**Fixed** by the `luaconf.h` patch (`LUA_INTEGER long long`); tests `intArgumentsKeepLow32BitsOf64BitInteger` and
+`largeIntegerArgumentsKeepLow32Bits`. The cmsgpack decode row is fixed by the `lua_cmsgpack.c` patch; test
+`cmsgpackUint64AndInt64`.
+
 All probed:
 
-| Script | Valkey / JNI | Wasm |
+| Script | Valkey / JNI | Wasm (unpatched) |
 |---|---|---|
 | `math.random(2^40)` | error `bad argument #1 to 'random' (interval is empty)` | a random number |
 | `math.randomseed(2^32 + 5)` | same sequence as `math.randomseed(5)` | a different sequence (seed 2147483647) |
@@ -45,17 +53,22 @@ All probed:
 | `table.insert(t, 2^32 + 1, 'x')` on an empty `t` | `t[1] == 'x'` | `t[1] == nil` |
 | `select(2^32 + 2, 'a', 'b')` | `'b'` | `nil` |
 | `cmsgpack.unpack_one(cmsgpack.pack(1, 2), 2^32 + 1)` | error `Start offset 1 greater than input length 2.` | error `Start offset 2147483647 greater than input length 2.` |
+| `cmsgpack.unpack('\207' .. string.rep('\255', 8))` (uint64 `0xcf ff…ff`) | `-1` (wraps into the signed 64-bit `lua_Integer`) | `1.844674407371e+19` (cmsgpack's `BITS_32` path pushes a double) |
 
 Some functions give the same result on both today, but only by accident. `string.sub`, `string.find`, `string.byte`
 and `struct.unpack` with a position of 2^32 or more agree because the saturated wasm value also lands past the end of
-the string. Section 6 explains why these become wrong on wasm after a partial fix.
+the string. Widening `LUA_INTEGER` alone would truncate those positions instead (`string.sub('abcdef', 2^32 + 2,
+2^32 + 3)` would return `"bc"`), so the `lstrlib.c` and `lua_struct.c` patches widen them too. Tests
+`stringIndicesBeyond32BitsAreNotTruncated` and `structUnpackPositionIs64Bit`.
 
 ## 2. `string.format` integer conversions use `long` (`luaconf.h:746-747`)
 
 Without `LUA_USELONGLONG`, `%d %i %x %X %o %u` format through `long` (`LUA_INTFRMLEN "l"`, `LUA_INTFRM_T long`). See
 `lstrlib.c:782,787`.
 
-| Script | Valkey / JNI | Wasm |
+**Fixed** by `-DLUA_USELONGLONG`; test `stringFormatIntegersAre64Bit`.
+
+| Script | Valkey / JNI | Wasm (unpatched) |
 |---|---|---|
 | `string.format('%d\|%x\|%u', 2^40, 2^40, 2^32)` (probed) | `1099511627776\|10000000000\|4294967296` | `2147483647\|ffffffff\|4294967295` |
 
@@ -63,7 +76,9 @@ Without `LUA_USELONGLONG`, `%d %i %x %X %o %u` format through `long` (`LUA_INTFR
 
 `STRUCT_INT` defaults to `long`. The `'l'`/`'L'` formats are `sizeof(long)` and `'T'` is `sizeof(size_t)`.
 
-| Script | Valkey / JNI | Wasm |
+**Fixed** by `-DSTRUCT_INT='long long'` and the `lua_struct.c` patch; test `structLongAndSizeTAre64Bit`.
+
+| Script | Valkey / JNI | Wasm (unpatched) |
 |---|---|---|
 | `struct.size('l')`, `'L'`, `'T'` (probed) | `8` | `4` |
 | `struct.unpack('<i8', struct.pack('<i8', 2^40))` (probed) | `1099511627776` | `-1` |
@@ -76,7 +91,9 @@ stores the result writes 4-byte fields on wasm and 8-byte fields on Valkey.
 
 For a base other than 10, `luaB_tonumber` uses `strtoul`, which clamps to `ULONG_MAX`.
 
-| Script | Valkey / JNI | Wasm |
+**Fixed** by the `lbaselib.c` patch (`strtoull`); test `tonumberWithBaseIs64Bit`.
+
+| Script | Valkey / JNI | Wasm (unpatched) |
 |---|---|---|
 | `tonumber('ffffffffff', 16)` (probed) | `1099511627775` | `4294967295` |
 | `tonumber('zzzzzzz', 36)` (probed) | `78364164095` | `4294967295` |
@@ -95,30 +112,34 @@ never runs. Both give `549755813887` and `1099511627776` (probed).
   the limit fails with an out-of-memory error where Valkey would carry on. Chicory's own limit is lower and is
   reached first; see section 8.
 
-## 6. Fixing it in the Wasm build
+## 6. The fix in the Wasm build
 
-### Confirmed
+The rule: wherever Valkey's code holds a value that came from a Lua integer in `ptrdiff_t`, `long`, `unsigned long` or
+`size_t`, the Wasm build holds it in a 64-bit type of the same signedness. On Valkey's hosts those types are 64-bit,
+so this reproduces Valkey's arithmetic, including where Valkey then casts to `int`.
 
-`lua.wasm` was rebuilt in a scratch copy with the following changes. That build passed `main`'s Wasm tests and matched
-JNI for `string.format` (section 2), `struct` (section 3), `math.random`, `math.randomseed` and `unpack`.
+Compile switches (`CFLAGS` in `lua/Makefile`):
 
-- `-DLUA_USELONGLONG`: an existing `luaconf.h` switch that makes `string.format` use `%lld`/`long long`.
-- `-DSTRUCT_INT='long long'`: `lua_struct.c` guards this with `#if !defined(STRUCT_INT)`.
-- Patch `luaconf.h`: `#define LUA_INTEGER long long`. It is set unconditionally there, so a `-D` flag cannot
-  override it.
-- Patch `lua_struct.c` `optsize`: `'l'`/`'L'`/`'T'` return `sizeof(long long)`.
+- `-DLUA_USELONGLONG`: an existing `luaconf.h` switch; `string.format` uses `%lld`/`long long`.
+- `-DSTRUCT_INT='long long'`: `lua_struct.c` guards it with `#if !defined(STRUCT_INT)`.
 
-### What that build breaks
+Patches (`lua/patches/`, applied with `patch -p1 -F 0` after the sources are extracted; a patch that does not apply
+exactly fails the build, and changing a patch or `VALKEY_SHA` re-extracts):
 
-`string.sub`, `string.byte`, `string.find` and others keep their positions in `ptrdiff_t`, which is still 32-bit. A
-64-bit `lua_Integer` is then truncated rather than saturated, so `string.sub('abcdef', 2^32 + 2, 2^32 + 3)` returns
-`"bc"` instead of `""`. Unpatched wasm gets this right by accident (section 1).
+| Patch | Change | Why |
+|---|---|---|
+| `luaconf.h.patch` | `LUA_INTEGER` `ptrdiff_t` → `long long` | set unconditionally, so a `-D` cannot override it (section 1) |
+| `lua_struct.c.patch` | `'l'`/`'L'`/`'T'` sizes → `sizeof(long long)`; `b_unpack`'s `pos` `size_t` → `unsigned long long` | section 3; `pos` would otherwise truncate a 64-bit position |
+| `lbaselib.c.patch` | `strtoul` → `strtoull`, `unsigned long long n` | section 4 |
+| `lstrlib.c.patch` | `posrelat` and the `str_sub`, `str_byte`, `str_find_aux` positions `ptrdiff_t` → `lua_Integer`; their `(size_t)` comparisons → `unsigned long long` | positions would otherwise truncate (section 1) |
+| `lua_cmsgpack.c.patch` | `BITS_32` forced to 0 | it tests pointer width, which stays 32-bit; the 64-bit path uses `lua_Integer` (section 1) |
 
-### Not yet tried
-
-- Section 4 needs its own patch: `strtoul` becomes `strtoull`, with `unsigned long long n`, in `lbaselib.c`.
-- The newer rows of section 1 (`string.rep`, `string.char`, `table.insert`, `select`, `cmsgpack.unpack_one`) should
-  follow a 64-bit `LUA_INTEGER`, but were not run against the patched build.
+The sites were found by grepping `deps/lua/src` for integer types and conversions (`long`, `strtoul`, `ptrdiff_t`,
+`lua_Integer`, `luaL_checkinteger`, `luaL_optinteger`, `lua_tointeger`, `size_t`) and for code that branches on
+pointer or word width (`UINTPTR_MAX`, `UINT_MAX`, `SIZE_MAX`, `LONG_MAX`, `ULONG_MAX`, `sizeof(void *)`, `BITS_32`,
+`LUAI_BITSINT`, `_LP64`). Checked and left alone: cmsgpack's offsets (`:858`, `:866`) are already `lua_Integer`; its
+`LONG_MAX` abort and `UINT_MAX` asserts concern buffers of 2 GiB or more, which the memory cap rules out; `ldblib.c`
+and `loslib.c` cast straight to `int`, as Valkey does; `LUAI_BITSINT` is the width of `int`, 32 on both.
 
 ### Only wasm64 fixes everything, and it is not available
 
@@ -133,9 +154,8 @@ it today (checked):
 - **wasi-sdk 34** ships sysroots only for `wasm32-wasip1`, `wasm32-wasip1-threads`, `wasm32-wasip2` and
   `wasm32-wasip3`. There is no wasm64 libc, so Lua cannot be built for `wasm64-wasip1`.
 
-So the Wasm backend stays wasm32. The patches above, plus `lstrlib.c` positions widened to 64-bit, fix every
-observable integer difference; the remaining `size_t`/pointer width shows only through the memory ceiling (section 8)
-and `tostring` addresses (section 5).
+So the Wasm backend stays wasm32. The patches above fix every observable integer difference; the remaining
+`size_t`/pointer width shows only through the memory ceiling (section 8) and `tostring` addresses (section 5).
 
 ## 7. The C stack is 64 KiB, so deep nesting traps instead of raising Valkey's error
 
@@ -199,15 +219,17 @@ This cannot be fixed in the build. A wasm32 module can address at most 4 GiB, an
 
 ## Tests
 
-`ValkeyLuaTest` pins sections 1–3 against 64-bit Valkey's values; `JniValkeyLuaTest` runs them as is:
+`ValkeyLuaTest` runs on both backends (`WasmValkeyLuaTest`, `JniValkeyLuaTest`) and pins 64-bit Valkey's values for
+sections 1–4:
 
 - `stringFormatIntegersAre64Bit`
 - `structLongAndSizeTAre64Bit`
 - `intArgumentsKeepLow32BitsOf64BitInteger`
 - `stringIndicesBeyond32BitsAreNotTruncated`
+- `largeIntegerArgumentsKeepLow32Bits`
+- `tonumberWithBaseIs64Bit`
+- `structUnpackPositionIs64Bit`
+- `cmsgpackUint64AndInt64`
 
-`WasmValkeyLuaTest` overrides the first three to assert the current 32-bit results. A fix to the Wasm build should
-delete those overrides, so the Valkey expectations apply to both backends. The last test passes on unpatched wasm by
-accident and fails on the partially patched build, so it guards against that regression. Section 4 and the newer
-rows of section 1 have no tests yet. Neither do sections 7 and 8. Shared tests for the section 7 nesting errors would
-fail on wasm until the stack is enlarged. Section 8 needs a Wasm-only test, because a 1 GiB string succeeds on JNI.
+`stringIndicesBeyond32BitsAreNotTruncated` and `structUnpackPositionIs64Bit` passed on the unpatched build too; they
+guard against a partial patch. Sections 7 and 8 have no tests yet.
