@@ -363,4 +363,11 @@ class ValkeyLuaTest {
         assertEquals("ERR unexpected reply from handler for server.acl_check_cmd", l.eval("redis.acl_check_cmd('GET')").value());
         assertEquals("ERR Please specify at least one argument for this call", l.eval("redis.acl_check_cmd()").value());
     }
+
+    @Test
+    void mathRandomMatchesValkey() {
+        assertEquals("75 13", ok("math.randomseed(42) return math.random(100) .. ' ' .. math.random(10, 20)"));
+        // luaL_error from a C function: luaL_where(1) prefixes the calling script's position; no ERR prefix.
+        assertEquals("user_script:1: wrong number of arguments", lua.eval("return math.random(1, 2, 3)").value());
+    }
 }

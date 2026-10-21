@@ -1,4 +1,5 @@
 #include <limits.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -10,6 +11,7 @@
 #include "lualib.h"
 
 #include "fpconv_dtoa.h"
+#include "rand.h"
 #include "sha1.h"
 
 LUALIB_API int(luaopen_cjson)(lua_State *L);
@@ -739,6 +741,49 @@ __attribute__((export_name("dealloc"))) void wasm_dealloc(void *p) { free(p); }
 __attribute__((export_name("result_ptr"))) char *result_ptr(void) { return result; }
 __attribute__((export_name("result_len"))) size_t result_len(void) { return result_size; }
 
+/* ---------------------------------------------------------------------------
+ * Custom provided math.random (script_lua.c)
+ * ------------------------------------------------------------------------- */
+
+/* We replace math.random() with our implementation that is not affected
+ * by specific libc random() implementations and will output the same sequence
+ * (for the same seed) in every arch. */
+
+/* The following implementation is the one shipped with Lua itself but with
+ * rand() replaced by serverLrand48(). */
+static int server_math_random(lua_State *L) {
+    /* the `%' avoids the (rare) case of r==1, and is needed also because on
+       some systems (SunOS!) `rand()' may return a value larger than RAND_MAX */
+    lua_Number r = (lua_Number)(serverLrand48() % SERVER_LRAND48_MAX) /
+                   (lua_Number)SERVER_LRAND48_MAX;
+    switch (lua_gettop(L)) {  /* check number of arguments */
+    case 0: {                 /* no arguments */
+        lua_pushnumber(L, r); /* Number between 0 and 1 */
+        break;
+    }
+    case 1: { /* only upper limit */
+        int u = luaL_checkint(L, 1);
+        luaL_argcheck(L, 1 <= u, 1, "interval is empty");
+        lua_pushnumber(L, floor(r * u) + 1); /* int between 1 and `u' */
+        break;
+    }
+    case 2: { /* lower and upper limits */
+        int l = luaL_checkint(L, 1);
+        int u = luaL_checkint(L, 2);
+        luaL_argcheck(L, l <= u, 2, "interval is empty");
+        lua_pushnumber(L, floor(r * (u - l + 1)) + l); /* int between `l' and `u' */
+        break;
+    }
+    default: return luaL_error(L, "wrong number of arguments");
+    }
+    return 1;
+}
+
+static int server_math_randomseed(lua_State *L) {
+    serverSrand48(luaL_checkint(L, 1));
+    return 0;
+}
+
 /* Runs a script in a fresh state. Returns 0 on success, 1 on Lua error.
  * The first return value (or the error message) is converted with tostring()
  * and left in result_ptr/result_len until the next call. */
@@ -789,6 +834,17 @@ __attribute__((export_name("eval"))) int eval(const char *src, size_t len) {
     lua_setglobal(L, "redis");
     lua_pushcfunction(L, luaRedisPcall);
     lua_setglobal(L, "pcall");
+
+    /* Replace math.random and math.randomseed with custom implementations. */
+    lua_getglobal(L, "math");
+    lua_pushstring(L, "random");
+    lua_pushcfunction(L, server_math_random);
+    lua_settable(L, -3);
+    lua_pushstring(L, "randomseed");
+    lua_pushcfunction(L, server_math_randomseed);
+    lua_settable(L, -3);
+    /* overwrite value of global variable 'math' with this modified math table present on top of stack. */
+    lua_setglobal(L, "math");
 
     lua_pushcfunction(L, resetHostState);
     int status = lua_pcall(L, 0, 0, 0) || luaL_loadbuffer(L, src, len, "@user_script") || lua_pcall(L, 0, 1, 0);
