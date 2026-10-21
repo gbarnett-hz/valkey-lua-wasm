@@ -38,7 +38,7 @@ Port the C from there; don't re-derive behaviour.
    - error messages `Please specify at least one argument for this call` and
      `Command arguments must be strings or integers` (current strings differ);
    - number → string: integer formatting when the double is an exact integer, else `fpconv_dtoa`
-     (already compiled in). Current `%.17g` turns `0.1` into `0.10000000000000001`.
+     (from Valkey's `deps/fpconv`, fetched by the Makefile). Current `%.17g` turns `0.1` into `0.10000000000000001`.
 7. README documents, in full:
    - what runs inside the module vs. what is delegated (the two lists in goals 2–3), plus the global patches and
      `KEYS`/`ARGV`;
@@ -156,8 +156,8 @@ public interface Handler {
 
 - `setResp`/`setRepl` receive only values that passed Valkey's checks. Like Valkey's run context, the state they
   set applies to the rest of the current `eval`. The handler holds that state.
-- **Per-eval reset** (decided with the user): before running each script, `ValkeyLua` calls `handler.setResp(2)` and
-  `handler.setRepl(REPL_ALL)`, mirroring Valkey's reset of `resp = 2` and `replication_flags = PROPAGATE_AOF |
+- **Per-eval reset** (decided with the user): at the start of each `eval`, before the script runs, the module itself calls `handler.setResp(2)` and
+  `handler.setRepl(REPL_ALL)` via `host_call` (same handler-visible order and failure behaviour), mirroring Valkey's reset of `resp = 2` and `replication_flags = PROPAGATE_AOF |
   PROPAGATE_REPL` at the start of every run (`script_lua.c:2060`). No extra lifecycle method.
   - Handlers must expect these calls even when the script never calls `setresp`/`set_repl`.
   - If either reset call returns an error reply, `eval` fails with `Result(ok=false, <err>)` without running the script.

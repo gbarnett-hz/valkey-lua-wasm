@@ -398,4 +398,28 @@ class ValkeyLuaTest {
         }
         assertEquals("2", ok("return 1 + 1"));
     }
+
+    /** The README's worked example; keep the two in sync. */
+    @Test
+    void readmeExample() {
+        var store = new java.util.HashMap<String, String>();
+        Handler handler = args -> {
+            String cmd = new String(args.get(0)).toUpperCase();
+            switch (cmd) {
+                case "SET":
+                    store.put(new String(args.get(1)), new String(args.get(2)));
+                    return "+OK\r\n".getBytes();
+                case "GET":
+                    String v = store.get(new String(args.get(1)));
+                    return v == null ? "$-1\r\n".getBytes() : ("$" + v.length() + "\r\n" + v + "\r\n").getBytes();
+                default:
+                    return ("-ERR unknown command '" + cmd + "'\r\n").getBytes();
+            }
+        };
+        var vl = new ValkeyLua(WASM, handler);
+        var r = vl.eval("redis.call('SET', KEYS[1], ARGV[1]); return redis.call('GET', KEYS[1])",
+                List.of("k".getBytes()), List.of("v".getBytes()));
+        assertEquals(new ValkeyLua.Result(true, "v"), r);
+        assertEquals(false, vl.eval("return redis.call('NOPE')").ok());
+    }
 }
