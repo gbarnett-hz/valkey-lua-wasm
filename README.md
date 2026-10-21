@@ -38,6 +38,10 @@ Both backends run each `eval` in a fresh `lua_State` and are not thread-safe. Th
 - 64-bit integers, as on Valkey: `-DLUA_USELONGLONG`, `-DSTRUCT_INT='long long'` and five patches in `lua/patches/`
   (`luaconf.h`, `lua_struct.c`, `lbaselib.c`, `lstrlib.c`, `lua_cmsgpack.c`), applied with `patch -F 0` so one that
   no longer applies exactly fails the build. What each fixes is in [wasm-difference.md](wasm-difference.md).
+- 8 MiB C stack (`-Wl,-z,stack-size=8388608`), so Valkey's own nesting limits (cjson's 1000 levels, `C stack
+  overflow`) fire before it runs out. Evals must run on a thread with at least 512 KiB of stack; every JVM default
+  meets this (1 MiB on Linux x86_64, 2 MiB on macOS arm64). Below that, deep nesting can overflow the JVM stack, and
+  the instance is poisoned.
 
 ## JNI backend
 
@@ -68,6 +72,9 @@ JNI-specific hazards handled in `JniValkeyLua`:
   from Java into Lua is protected; where the Wasm backend traps (a failing `__tostring` on the result), this one
   throws `IllegalStateException` and poisons the instance.
 - The natives are loaded once per JVM.
+- Lua's C code runs on the calling thread's native stack. Measured: at a 512 KiB thread stack, a script nesting
+  `string.gsub` callbacks 250 deep overflows it and the JVM dies (SIGILL); 768 KiB and up (the JVM defaults are 1 MiB
+  and more) raise Valkey's `C stack overflow`. Don't run evals on threads with small stacks.
 
 ## Where the backends differ
 

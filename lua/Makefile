@@ -23,9 +23,11 @@ SRCS := $(addprefix $(LUA_SRC)/,$(addsuffix .c,$(LUA_FILES))) valkey_lua.c $(DEP
 CFLAGS := -O2 -DLUA_ANSI -DENABLE_CJSON_GLOBAL -DLUA_USE_MKSTEMP -DLUA_USELONGLONG -DSTRUCT_INT='long long' -I$(LUA_SRC) -I$(DEPS)/valkey/deps/fpconv -I$(DEPS)/valkey/src -Icompat \
 	-mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false \
 	-D_WASI_EMULATED_PROCESS_CLOCKS -Wno-implicit-function-declaration
-LDFLAGS := -mexec-model=reactor -lsetjmp -lwasi-emulated-process-clocks
+# 8 MiB C stack (wasm-ld defaults to 64 KiB), so Valkey's nesting limits fire before it runs out; stack-first layout
+# (the default) keeps an overflow a trap. See wasm-difference.md section 7.
+LDFLAGS := -mexec-model=reactor -lsetjmp -lwasi-emulated-process-clocks -Wl,-z,stack-size=8388608
 
-lua.wasm: $(SRCS) $(STAMP)
+lua.wasm: $(SRCS) $(STAMP) Makefile
 	$(CC) $(CFLAGS) $(SRCS) $(LDFLAGS) -o $@
 
 $(SRCS): | $(STAMP)

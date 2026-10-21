@@ -512,6 +512,29 @@ abstract class ValkeyLuaTest {
             + "return hex(cmsgpack.pack(2^40)) .. ' ' .. hex(cmsgpack.pack(-2^40)) .. ' ' .. tostring(cmsgpack.unpack(cmsgpack.pack(-2^40)))"));
     }
 
+    /*
+     * Valkey's own nesting limits (cjson's 1000 levels, LUAI_MAXCCALLS of 200) must fire before any stack runs out:
+     * lua.wasm's C stack, or the JVM thread stack Chicory's compiled code runs on. See wasm-difference.md section 7.
+     */
+
+    static final String[][] NESTING = {
+        {"local t = {} local c = t for i=1,1000 do c[1] = {} c = c[1] end return #cjson.encode(t)",
+            "user_script:1: Cannot serialise, excessive nesting (1001)"},
+        {"return #cjson.decode(string.rep('[',2000)..string.rep(']',2000))",
+            "user_script:1: Found too many nested data structures (1001) at character 1001"},
+        {"local function f(n) if n==0 then return 'y' end return (string.gsub('x','x',function() return f(n-1) end)) end return f(250)",
+            "C stack overflow"},
+    };
+
+    @Test
+    void nestingRaisesValkeysErrors() {
+        for (String[] c : NESTING) {
+            assertEquals(new ValkeyLua.Result(false, c[1]), lua.eval(c[0]), c[0]);
+        }
+        assertEquals("y", ok("local function f(n) if n==0 then return 'y' end return (string.gsub('x','x',function() return f(n-1) end)) end return f(195)"));
+        assertEquals("1", ok("return 1")); // same instance still usable
+    }
+
     private static byte[] b(String s) {
         return s.getBytes(StandardCharsets.UTF_8);
     }

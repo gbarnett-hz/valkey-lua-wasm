@@ -3,7 +3,7 @@
 Sections 1–6 come from wasm32's 32-bit types; sections 7–8 come from how `lua.wasm` is built and run (C stack size,
 Chicory's memory limit).
 
-**Status:** sections 1–4 are fixed. `lua/Makefile` applies the patches in `lua/patches/` and two compile switches
+**Status:** sections 1–4 and 7 are fixed. `lua/Makefile` applies the patches in `lua/patches/` and two compile switches
 (section 6), so every value derived from a Lua integer is 64-bit, as on Valkey. The "Wasm" columns in those sections
 show the unpatched build, for the record.
 
@@ -157,7 +157,11 @@ it today (checked):
 So the Wasm backend stays wasm32. The patches above fix every observable integer difference; the remaining
 `size_t`/pointer width shows only through the memory ceiling (section 8) and `tostring` addresses (section 5).
 
-## 7. The C stack is 64 KiB, so deep nesting traps instead of raising Valkey's error
+## 7. The C stack was 64 KiB, so deep nesting trapped instead of raising Valkey's error
+
+**Fixed** by linking with an 8 MiB C stack (`-Wl,-z,stack-size=8388608` in `lua/Makefile`); tests
+`nestingRaisesValkeysErrors` (shared) and `nestingErrorsAtMinimumThreadStack` (Wasm-only). The "Wasm" column below is
+the 64 KiB build.
 
 `lua.wasm` is linked with wasm-ld's default 64 KiB C stack (`__stack_pointer` starts at 65536). Valkey runs on a native
 thread stack (megabytes), so its own nesting limits fire first: cjson's 1000-level limit and Lua's `LUAI_MAXCCALLS`
@@ -165,7 +169,7 @@ thread stack (megabytes), so its own nesting limits fire first: cjson's 1000-lev
 
 All probed:
 
-| Script | Valkey / JNI | Wasm |
+| Script | Valkey / JNI | Wasm (64 KiB stack) |
 |---|---|---|
 | `cjson.encode` of a table nested 800 deep | succeeds | succeeds |
 | `cjson.encode` of a table nested 1000 deep | error `Cannot serialise, excessive nesting (1001)` | trap: `WasmRuntimeException: out of bounds memory access: attempted to access address: -376` |
@@ -173,7 +177,7 @@ All probed:
 | `string.gsub` with a callback that recurses through `string.gsub`, 195 levels | `'y'` | trap (address -224) |
 | the same, 250 levels | error `C stack overflow` | trap (address -224) |
 
-What a script sees:
+What a script saw:
 
 - The trap is not a Lua error. `pcall` cannot catch it, and `eval` does not return `Result(ok=false)`.
 - It escapes `eval` as a `WasmRuntimeException`, and the instance is poisoned: every later `eval` throws
@@ -188,8 +192,20 @@ These matched on both backends (probed): Lua-to-Lua recursion (15000 levels succ
 `__index` chain 190 deep, a `string.find` pattern nested 5000 deep, and the parser's nesting limit
 (`loadstring` of 300 nested parentheses).
 
-**Fix (not yet tried):** link with a larger stack, e.g. `-Wl,-z,stack-size=8388608` (8 MiB, the usual native thread
-stack size). Valkey's own limits should then fire first and give the same errors.
+**The fix, and the JVM thread stack.** With 8 MiB, Valkey's own limits fire first and give the same errors as Valkey.
+Chicory's compiler turns Wasm calls into JVM calls on the calling thread, so the deeper Wasm stack also uses more of
+the JVM thread's stack. Measured with the four cases above:
+
+| JVM thread stack | Platform thread | Virtual thread |
+|---|---|---|
+| 2 MiB (macOS arm64 default) | Valkey's errors, instance survives | same |
+| 1 MiB (Linux x86_64 default) | Valkey's errors, instance survives | same |
+| 512 KiB | Valkey's errors, instance survives | same |
+| 256 KiB | `ChicoryException` escapes `eval`; instance poisoned | same |
+
+So Wasm evals need a thread stack of at least 512 KiB, which every JVM default meets. The JNI backend needs more:
+luajava runs Lua's C code on the thread's native stack, and at 512 KiB the 250-level `string.gsub` case overflows it
+and the JVM dies (SIGILL). It passed at 768 KiB, 1 MiB and 2 MiB.
 
 ## 8. Chicory caps the Lua heap just under 2 GiB
 
@@ -232,4 +248,5 @@ sections 1–4:
 - `cmsgpackUint64AndInt64`
 
 `stringIndicesBeyond32BitsAreNotTruncated` and `structUnpackPositionIs64Bit` passed on the unpatched build too; they
-guard against a partial patch. Sections 7 and 8 have no tests yet.
+guard against a partial patch. Section 7: `nestingRaisesValkeysErrors` (shared) and
+`nestingErrorsAtMinimumThreadStack` (Wasm-only, runs on a 512 KiB thread). Section 8 has no test yet.
