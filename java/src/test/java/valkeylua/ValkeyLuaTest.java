@@ -388,4 +388,14 @@ class ValkeyLuaTest {
         var r = lua.eval("return #KEYS[1] .. ' ' .. #ARGV[1]", List.of(b("a\0b")), List.of(b("x\r\ny")));
         assertEquals("3 4", r.value());
     }
+
+    @Test
+    void malformedKeysArgvBufferIsAnError() {
+        for (String bad : new String[] {"", "*3\r\n", "*2\r\n*1\r\n$5\r\nab\r\n*0\r\n"}) {
+            var r = lua.eval("return 1", bad.getBytes(StandardCharsets.UTF_8));
+            assertEquals(false, r.ok());
+            assertEquals("malformed KEYS/ARGV buffer", r.value());
+        }
+        assertEquals("2", ok("return 1 + 1"));
+    }
 }

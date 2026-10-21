@@ -84,7 +84,6 @@ public final class ValkeyLua {
     }
 
     public Result eval(String script, List<byte[]> keys, List<byte[]> args) {
-        byte[] src = script.getBytes(StandardCharsets.UTF_8);
         var kvOut = new java.io.ByteArrayOutputStream();
         kvOut.writeBytes("*2\r\n".getBytes(StandardCharsets.US_ASCII));
         for (var list : List.of(keys, args)) {
@@ -95,7 +94,12 @@ public final class ValkeyLua {
                 kvOut.writeBytes("\r\n".getBytes(StandardCharsets.US_ASCII));
             }
         }
-        byte[] kv = kvOut.toByteArray();
+        return eval(script, kvOut.toByteArray());
+    }
+
+    /** Package-private seam so tests can pass a raw (possibly malformed) KEYS/ARGV buffer. */
+    Result eval(String script, byte[] kv) {
+        byte[] src = script.getBytes(StandardCharsets.UTF_8);
         int ptr = (int) instance.export("alloc").apply(src.length)[0];
         int kvPtr = (int) instance.export("alloc").apply(kv.length)[0];
         try {
