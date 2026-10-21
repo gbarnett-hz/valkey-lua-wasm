@@ -157,11 +157,11 @@ exception, never a silently wrong value. An error reply is never "wrong type": i
    - `redis.call` raises, with the **whole converted reply** as the error value (Valkey raises the top of stack,
      which is the outer reply, not the nested error table);
    - `redis.pcall` returns the whole converted reply.
-   Read from the source, not yet run against a real Valkey; a test should pin it, and if Valkey behaves differently,
+   Pinned by `nestedErrorFailsWholeCall`; not yet checked against a real Valkey, and if Valkey behaves differently,
    Valkey wins.
-6. **`ValkeyLua` catches any exception** thrown by a handler and turns it into `-ERR <message>`, so a buggy
+6. **`ValkeyLua` catches any `RuntimeException`** thrown by a handler and turns it into `-ERR <message>`, so a buggy
    mapping becomes a script error instead of unwinding past Lua. (A Java exception unwinding out of a Wasm host
-   call skips `lua_close` and leaks the `lua_State`. Believed, not yet tested; a test should pin it.)
+   call skips `lua_close` and leaks the `lua_State`. Instance survival is tested by `handlerExceptionBecomesScriptErrorAndInstanceSurvives`; the leak itself is believed, not tested. An `Error` such as `StackOverflowError` still escapes.)
 7. Uncaught Lua errors end `eval` with `Result(ok=false, message)`, where message is the error table's `err`
    field (current behaviour, unchanged).
 
