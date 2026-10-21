@@ -153,6 +153,24 @@ abstract class ValkeyLuaTest {
         assertEquals(NULL, okOn(l, "return false")); // each eval starts at RESP 2
     }
 
+    @Test
+    void metatablesDuringConversion() {
+        // The conversion reads fields raw, so no metamethod runs on a returned table...
+        assertEquals(array(), ok("return setmetatable({}, {__tostring = function() error('no') end})"));
+        // ...but error extraction uses lua_getfield, as on Valkey, so __index can supply the fields.
+        assertEquals(error("E script: on @user_script:1."),
+            err("error(setmetatable({}, {__index = function() return 'E' end}))"));
+    }
+
+    @Test
+    void raisingIndexOnErrorTablePoisons() {
+        // Valkey would hit Lua's panic here; both backends throw instead of letting the error escape unprotected.
+        var e = assertThrows(IllegalStateException.class,
+            () -> lua.eval("return setmetatable({err='x'}, {__index = function() error('boom') end})"));
+        assertEquals("reply conversion failed", e.getMessage());
+        assertThrows(IllegalStateException.class, () -> lua.eval("return 1"));
+    }
+
     static final String[] INT64_EDGES = {"return 2^63", "return -2^63-1e5", "return 1/0", "return -1/0", "return 0/0"};
 
     List<String> int64Edges() {
