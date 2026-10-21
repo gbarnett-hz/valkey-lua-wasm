@@ -104,7 +104,73 @@ class ValkeyLuaTest {
         assertEquals("WRONGTYPE bad", r.value());
         assertEquals("WRONGTYPE bad", ok("return redis.pcall('INCR', 'k').err"));
         assertEquals("false WRONGTYPE bad", ok(
-                "local ok, e = pcall(redis.call, 'INCR', 'k') return tostring(ok) .. ' ' .. e.err"));
+                "local ok, e = pcall(redis.call, 'INCR', 'k') return tostring(ok) .. ' ' .. e"));
+    }
+
+    @Test
+    void redisIsAliasOfServer() {
+        assertEquals("true", ok("return tostring(redis == server)"));
+        assertEquals("OK", ok("return server.call('SET', 'k', 'v').ok"));
+    }
+
+    @Test
+    void commandErrorRewrites() {
+        reply = "-ERR unknown command 'FOO', with args beginning with: \r\n";
+        assertEquals("ERR Unknown command called from script", ok("return redis.pcall('FOO').err"));
+        reply = "-ERR wrong number of arguments for 'get' command\r\n";
+        assertEquals("ERR Wrong number of args calling command from script", ok("return redis.pcall('GET').err"));
+        reply = "-ERR command not allowed\r\n";
+        assertEquals("ERR This Valkey command is not allowed from script", ok("return redis.pcall('X').err"));
+        reply = "-NOPERM no access to key\r\n";
+        assertEquals("ERR ACL failure in script: no access to key", ok("return redis.pcall('GET', 'k').err"));
+        reply = "-WRONGTYPE bad\r\n";
+        assertEquals("WRONGTYPE bad", ok("return redis.pcall('GET', 'k').err"));
+        assertEquals("true", ok("return tostring(redis.pcall('GET', 'k').ignore_error_stats_update)"));
+    }
+
+    @Test
+    void nestedErrorFailsWholeCall() {
+        reply = "*2\r\n+OK\r\n-ERR inner\r\n";
+        assertEquals("OK ERR inner true", ok(
+            "local r = redis.pcall('EXEC') return r[1].ok .. ' ' .. r[2].err .. ' ' .. tostring(r[2].ignore_error_stats_update)"));
+        assertEquals("OK ERR inner", ok(
+            "local ok, e = pcall(function() return redis.call('EXEC') end) return e[1].ok .. ' ' .. e[2].err"));
+    }
+
+    @Test
+    void globalPcallReturnsErrorStrings() {
+        reply = "-WRONGTYPE bad\r\n";
+        assertEquals("false WRONGTYPE bad", ok(
+            "local ok, e = pcall(redis.call, 'INCR', 'k') return tostring(ok) .. ' ' .. e"));
+        assertEquals("true 1 2", ok("local ok, a, b = pcall(function() return 1, 2 end) return tostring(ok)..' '..a..' '..b"));
+    }
+
+    @Test
+    void malformedReplyIsScriptError() {
+        for (String bad : List.of("", "hello", "$5\r\nab", "*2\r\n:1\r\n")) {
+            reply = bad;
+            for (String fn : List.of("call", "pcall")) {
+                var r = lua.eval("return redis." + fn + "('GET', 'k')");
+                assertEquals(false, r.ok(), bad);
+                assertEquals("ERR unexpected reply from handler for server.call", r.value(), bad);
+            }
+        }
+        reply = "+OK\r\n";
+        assertEquals("OK", ok("return redis.call('PING').ok"));
+    }
+
+    @Test
+    void bulkReplyWithCrlfIsBinarySafe() {
+        reply = "$5\r\na\r\n\0b\r\n";
+        assertEquals("5", ok("return #redis.call('GET', 'k')"));
+    }
+
+    @Test
+    void largeArrayReply() {
+        var sb = new StringBuilder("*10000\r\n");
+        for (int i = 0; i < 10000; i++) sb.append(":").append(i).append("\r\n");
+        reply = sb.toString();
+        assertEquals("10000 9999", ok("local r = redis.call('X') return #r .. ' ' .. r[10000]"));
     }
 
     @Test
