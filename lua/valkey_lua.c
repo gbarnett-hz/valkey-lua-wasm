@@ -1,4 +1,6 @@
+#include <limits.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,6 +8,8 @@
 #include "lauxlib.h"
 #include "lua.h"
 #include "lualib.h"
+
+#include "fpconv_dtoa.h"
 
 LUALIB_API int(luaopen_cjson)(lua_State *L);
 LUALIB_API int(luaopen_struct)(lua_State *L);
@@ -239,32 +243,198 @@ static const char *pushReply(lua_State *L, const char *p, const char *end, int *
     return NULL;
 }
 
-static int redisGenericCommand(lua_State *L, int raise_error) {
-    int argc = lua_gettop(L);
-    if (argc == 0) return luaL_error(L, "Please specify at least one argument for this redis lib call");
+/* Return the number of digits of 'v' when converted to string in radix 10.
+ * See ll2string() for more information. */
+static uint32_t digits10(uint64_t v) {
+    if (v < 10) return 1;
+    if (v < 100) return 2;
+    if (v < 1000) return 3;
+    if (v < 1000000000000UL) {
+        if (v < 100000000UL) {
+            if (v < 1000000) {
+                if (v < 10000) return 4;
+                return 5 + (v >= 100000);
+            }
+            return 7 + (v >= 10000000UL);
+        }
+        if (v < 10000000000UL) {
+            return 9 + (v >= 1000000000UL);
+        }
+        return 11 + (v >= 100000000000UL);
+    }
+    return 12 + digits10(v / 1000000000000UL);
+}
 
+/* Convert a unsigned long long into a string. Returns the number of
+ * characters needed to represent the number.
+ * If the buffer is not big enough to store the string, 0 is returned.
+ *
+ * Based on the following article (that apparently does not provide a
+ * novel approach but only publicizes an already used technique):
+ *
+ * https://web.archive.org/web/20150427221229/https://www.facebook.com/notes/facebook-engineering/three-optimization-tips-for-c/10151361643253920 */
+static int ull2string(char *dst, size_t dstlen, unsigned long long value) {
+    static const char digits[201] = "0001020304050607080910111213141516171819"
+                                    "2021222324252627282930313233343536373839"
+                                    "4041424344454647484950515253545556575859"
+                                    "6061626364656667686970717273747576777879"
+                                    "8081828384858687888990919293949596979899";
+
+    /* Check length. */
+    uint32_t length = digits10(value);
+    if (length >= dstlen) goto err;
+    ;
+
+    /* Null term. */
+    uint32_t next = length - 1;
+    dst[next + 1] = '\0';
+    while (value >= 100) {
+        int const i = (value % 100) * 2;
+        value /= 100;
+        dst[next] = digits[i + 1];
+        dst[next - 1] = digits[i];
+        next -= 2;
+    }
+
+    /* Handle last 1-2 digits. */
+    if (value < 10) {
+        dst[next] = '0' + (uint32_t)value;
+    } else {
+        int i = (uint32_t)value * 2;
+        dst[next] = digits[i + 1];
+        dst[next - 1] = digits[i];
+    }
+    return length;
+err:
+    /* force add Null termination */
+    if (dstlen > 0) dst[0] = '\0';
+    return 0;
+}
+
+/* Convert a long long into a string. Returns the number of
+ * characters needed to represent the number.
+ * If the buffer is not big enough to store the string, 0 is returned. */
+static int ll2string(char *dst, size_t dstlen, long long svalue) {
+    unsigned long long value;
+    int negative = 0;
+
+    /* The ull2string function with 64bit unsigned integers for simplicity, so
+     * we convert the number here and remember if it is negative. */
+    if (svalue < 0) {
+        if (svalue != LLONG_MIN) {
+            value = -svalue;
+        } else {
+            value = ((unsigned long long)LLONG_MAX) + 1;
+        }
+        if (dstlen < 2) goto err;
+        negative = 1;
+        dst[0] = '-';
+        dst++;
+        dstlen--;
+    } else {
+        value = svalue;
+    }
+
+    /* Converts the unsigned long long value to string*/
+    int length = ull2string(dst, dstlen, value);
+    if (length == 0) return 0;
+    return length + negative;
+
+err:
+    /* force add Null termination */
+    if (dstlen > 0) dst[0] = '\0';
+    return 0;
+}
+
+/* Returns 1 if the double value can safely be represented in long long without
+ * precision loss, in which case the corresponding long long is stored in the out variable. */
+static int double2ll(double d, long long *out) {
+#if (__DBL_MANT_DIG__ >= 52) && (__DBL_MANT_DIG__ <= 63) && (LLONG_MAX == 0x7fffffffffffffffLL)
+    /* Check if the float is in a safe range to be casted into a
+     * long long. We are assuming that long long is 64 bit here.
+     * Also we are assuming that there are no implementations around where
+     * double has precision < 52 bit.
+     *
+     * Under this assumptions we test if a double is inside a range
+     * where casting to long long is safe. Then using two castings we
+     * make sure the decimal part is zero. If all this is true we can use
+     * integer without precision loss.
+     *
+     * Note that numbers above 2^52 and below 2^63 use all the fraction bits as real part,
+     * and the exponent bits are positive, which means the "decimal" part must be 0.
+     * i.e. all double values in that range are representable as a long without precision loss,
+     * but not all long values in that range can be represented as a double.
+     * we only care about the first part here. */
+    if (d < (double)(-LLONG_MAX / 2) || d > (double)(LLONG_MAX / 2)) return 0;
+    long long ll = d;
+    if (ll == d) {
+        *out = ll;
+        return 1;
+    }
+#else
+#endif
+    return 0;
+}
+
+/* Encodes the Lua call arguments as a RESP2 array of bulk strings into b. On failure pushes the Valkey
+ * error table and returns 0. Port of luaArgsToServerArgv, which builds an argv instead of a request. */
+static int luaArgsToRequest(lua_State *lua, luaL_Buffer *b) {
+    int j;
+    /* Require at least one argument */
+    int argc = lua_gettop(lua);
+    if (argc == 0) {
+        luaPushError(lua, "Please specify at least one argument for this call");
+        return 0;
+    }
+
+    char hdr[32];
+    luaL_addlstring(b, hdr, snprintf(hdr, sizeof(hdr), "*%d\r\n", argc));
+
+    for (j = 0; j < argc; j++) {
+        char *obj_s;
+        size_t obj_len;
+        char dbuf[64];
+
+        if (lua_type(lua, j + 1) == LUA_TNUMBER) {
+            /* We can't use lua_tolstring() for number -> string conversion
+             * since Lua uses a format specifier that loses precision. */
+            lua_Number num = lua_tonumber(lua, j + 1);
+            /* Integer printing function is much faster, check if we can safely use it.
+             * Since lua_Number is not explicitly an integer or a double, we need to make an effort
+             * to convert it as an integer when that's possible, since the string could later be used
+             * in a context that doesn't support scientific notation (e.g. 1e9 instead of 100000000). */
+            long long lvalue;
+            if (double2ll((double)num, &lvalue)) {
+                obj_len = ll2string(dbuf, sizeof(dbuf), lvalue);
+            } else {
+                obj_len = fpconv_dtoa((double)num, dbuf);
+                dbuf[obj_len] = '\0';
+            }
+            obj_s = dbuf;
+        } else {
+            obj_s = (char *)lua_tolstring(lua, j + 1, &obj_len);
+            if (obj_s == NULL) break; /* Not a string. */
+        }
+
+        luaL_addlstring(b, hdr, snprintf(hdr, sizeof(hdr), "$%zu\r\n", obj_len));
+        luaL_addlstring(b, obj_s, obj_len);
+        luaL_addlstring(b, "\r\n", 2);
+    }
+
+    /* Check if one of the arguments passed by the Lua script
+     * is not a string or an integer (lua_isstring() return true for
+     * integers as well). */
+    if (j != argc) {
+        luaPushError(lua, "Command arguments must be strings or integers");
+        return 0;
+    }
+    return 1;
+}
+
+static int redisGenericCommand(lua_State *L, int raise_error) {
     luaL_Buffer b;
     luaL_buffinit(L, &b);
-    char tmp[64];
-    snprintf(tmp, sizeof(tmp), "*%d\r\n", argc);
-    luaL_addstring(&b, tmp);
-    for (int i = 1; i <= argc; i++) {
-        char num[64];
-        const char *s;
-        size_t len;
-        if (lua_type(L, i) == LUA_TNUMBER) {
-            len = snprintf(num, sizeof(num), "%.17g", lua_tonumber(L, i));
-            s = num;
-        } else if (lua_type(L, i) == LUA_TSTRING) {
-            s = lua_tolstring(L, i, &len);
-        } else {
-            return luaL_error(L, "Lua redis lib command arguments must be strings or integers");
-        }
-        snprintf(tmp, sizeof(tmp), "$%zu\r\n", len);
-        luaL_addstring(&b, tmp);
-        luaL_addlstring(&b, s, len);
-        luaL_addlstring(&b, "\r\n", 2);
-    }
+    if (!luaArgsToRequest(L, &b)) return raise_error ? lua_error(L) : 1;
     luaL_pushresult(&b);
 
     size_t req_len, reply_len;

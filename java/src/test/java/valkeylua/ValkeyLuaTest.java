@@ -174,13 +174,16 @@ class ValkeyLuaTest {
     }
 
     @Test
-    void redisCallArgumentErrors() {
-        var r = lua.eval("return redis.call()");
-        assertEquals(false, r.ok());
-        assertTrue(r.value().contains("Please specify at least one argument"), r.value());
-        r = lua.eval("return redis.call('SET', {})");
-        assertEquals(false, r.ok());
-        assertTrue(r.value().contains("must be strings or integers"), r.value());
+    void numberArgumentsFormatLikeValkey() {
+        ok("return redis.call('X', 10, -5, 3.0, 0.1, 2.5)");
+        assertEquals(List.of("X", "10", "-5", "3", "0.1", "2.5"), calls.get(0));
+    }
+
+    @Test
+    void argumentErrorMessagesMatchValkey() {
+        assertEquals("ERR Please specify at least one argument for this call", lua.eval("return redis.call()").value());
+        assertEquals("ERR Command arguments must be strings or integers", lua.eval("return redis.call('SET', {})").value());
+        assertEquals("ERR Command arguments must be strings or integers", ok("return redis.pcall('SET', {}).err"));
         assertEquals(List.of(), calls);
     }
 
