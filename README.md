@@ -10,7 +10,7 @@ API delegated to a `Handler`. Two backends behind one API (`ValkeyLua`) and one 
 | Isolation | Wasm sandbox; nothing native | native code in the JVM; a Lua panic would kill the JVM (guarded, see below) |
 | Integer width | 64-bit, as Valkey (patched; pointers and `size_t` stay 32-bit) | 64-bit, as Valkey |
 | Build | wasi-sdk | host C/C++ compiler, JNI headers |
-| Construct | `new WasmValkeyLua(Path wasm, handler[, info])` | `new JniValkeyLua(handler[, info])` |
+| Construct | `new WasmValkeyLua(Path wasm, handler[, info[, maxRetainedBytes]])` | `new JniValkeyLua(handler[, info])` |
 
 Both give 64-bit Valkey's results; the few remaining differences are in [Where the backends differ](#where-the-backends-differ).
 
@@ -102,13 +102,12 @@ hosts" in `ValkeyLuaTest` pin Valkey's values on both backends. What remains:
 
 | Deviation | Wasm |
 |---|---|
-| Memory cap | Chicory allows just under 2 GiB, less the 8 MiB C stack. Past it a script gets the Lua error `not enough memory`, which `pcall` can catch; the instance survives. If building the reply runs out instead (e.g. returning `{s, s}` for a 512 MiB `s`), `eval` throws `IllegalStateException` and poisons the instance. Valkey has no Lua-specific limit. |
+| Memory cap | Chicory allows just under 2 GiB, less the 8 MiB C stack. Past it a script gets the Lua error `not enough memory`, which `pcall` can catch; the instance survives. Wasm memory never shrinks, so after an eval leaves it above `maxRetainedBytes` (default 128 MiB) the instance is rebuilt to release it; scripts can't tell. If building the reply runs out instead (e.g. returning `{s, s}` for a 512 MiB `s`), `eval` throws `IllegalStateException` and poisons the instance. Valkey has no Lua-specific limit. |
 | Memory accounting and GC timing | 32-bit pointers make objects smaller, so `collectgarbage('count')` figures, collector timing and weak-table clearing differ. |
 | `tostring` address width | 32-bit addresses (`table: 0x1e3f0`). Cosmetic. |
 | JVM thread stack bounds deep recursion | Valkey's own nesting limits need 512 KiB (every default meets it). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern backtracking, converting a nested return value) is bounded by the JVM stack: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the instance where Valkey returns a table, and returning a table nested about 3650 deep (4280 at 2 MiB) throws `ChicoryException` and poisons it where Valkey replies (or, from about 8000, sends `reached lua stack limit`). |
 | Out-of-range number returned | `(long long)` of the double saturates: `return 2^63` gives `:9223372036854775807`, `1/0` and `-1/0` the int64 limits, `0/0` gives `:0`. That matches JNI and Valkey on arm64; on x86-64 they give `:-9223372036854775808` for all of these (the cast is undefined in C). |
 | String collation | Lua compares strings with `strcoll`. `lua.wasm` always uses the C locale (byte order), as do Valkey's official Docker images. A server whose `locale-collate` or environment names a language locale such as `en_US.UTF-8` orders strings differently (`'a' < 'B'`, `table.sort`). JNI follows the JVM process's locale through the host's C library, so it matches Wasm under `C` but not glibc under a language locale. |
-| Memory kept after growth | Wasm memory never shrinks: an instance that grew near the cap keeps up to ~2 GiB of JVM heap until discarded. |
 | `string.dump` output | Headers record a 4-byte `size_t`, so dumps differ in bytes and length. |
 | `pairs` order over table- or function-keyed tables | Those keys hash by address, so iteration order differs. |
 

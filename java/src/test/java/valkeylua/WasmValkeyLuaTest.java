@@ -52,6 +52,21 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
     }
 
     @Test
+    void memoryAboveMaxRetainedIsReleasedAndRandomContinues() {
+        // Wasm memory never shrinks; the instance is rebuilt instead (gaps.md section 5). The rebuild must not restart
+        // math.random, whose state lives for the instance on Valkey and JNI.
+        var grown = new WasmValkeyLua(WASM, args -> "+OK\r\n".getBytes(UTF_8));
+        var other = new WasmValkeyLua(WASM, args -> "+OK\r\n".getBytes(UTF_8));
+        long initial = grown.memoryBytes();
+        String random = "return math.random(1000) .. ' ' .. math.random(1000)";
+        assertEquals(other.eval(random), grown.eval(random));
+        assertEquals(result(true, integer(1L << 28)),
+            grown.eval("local s = 'x' for i = 1, 28 do s = s .. s end return #s"));
+        assertEquals(initial, grown.memoryBytes());
+        assertEquals(other.eval(random), grown.eval(random));
+    }
+
+    @Test
     void deepReplyNestingPoisons() throws Exception {
         // Converting the reply recurses per nesting level, as Valkey does; on Chicory that is bounded by the JVM thread
         // stack (about 3650 levels at 1 MiB) before Valkey's own `reached lua stack limit` (about 8000) fires.

@@ -14,7 +14,6 @@ fixed sections show the build before the fix.
 | Gap | What a script sees | Backend | § |
 |---|---|---|---|
 | Memory cap | Lua data is capped just under 2 GiB: `not enough memory`, catchable. If building the reply runs out, `eval` throws and poisons the instance. Valkey has no Lua-specific limit. | Wasm | 5 |
-| Memory kept after growth | Wasm memory never shrinks: an instance that grew keeps that `byte[]` (up to ~2 GiB of JVM heap) for its life. | Wasm | 5 |
 | Unlimited recursion | Recursion Valkey does not limit (`cmsgpack.unpack` nesting, pattern backtracking, nested return values) is bounded by the JVM thread stack: Wasm poisons the instance, JNI kills the JVM. | both | 4 |
 | String collation under a language locale | Wasm always collates in byte order, as Valkey's official images do. A server whose `locale-collate` or environment names a locale such as `en_US.UTF-8` orders strings differently (`'a' < 'B'`, `table.sort`). | Wasm | 6 |
 | Out-of-range number returned | `return 2^63`, `1/0`, `-1/0`, `0/0` saturate on Wasm; Valkey matches on arm64 but gives `INT64_MIN` on x86-64. | Wasm on x86-64 | 6 |
@@ -37,6 +36,7 @@ collation only on a server configured with a language locale.
 | `tonumber(s, base)` through `unsigned long` | `lbaselib.c` patch | `tonumberWithBaseIs64Bit` | 1 |
 | `collectgarbage('step', n)` wraps | `lapi.c` patch | `collectgarbageStepSizeIs64Bit` | 3 |
 | 64 KiB C stack trapped before Valkey's nesting limits | 8 MiB C stack | `nestingRaisesValkeysErrors`, `nestingErrorsAtMinimumThreadStack` | 4 |
+| Memory kept after growth: Wasm memory never shrinks, so an instance kept up to ~2 GiB of JVM heap for its life | Rebuild the instance after an eval leaves memory above `maxRetainedBytes` (default 128 MiB), carrying `math.random`'s state over | `memoryAboveMaxRetainedIsReleasedAndRandomContinues` | 5 |
 
 `stringIndicesBeyond32BitsAreNotTruncated` and `structUnpackPositionIs64Bit` also passed before the fix; they guard
 against a partial patch.
@@ -201,9 +201,18 @@ only cap. Growing copies the `byte[]`, so the JVM needs room for two copies near
 | four `string.rep('x', 2^29)` concatenated (2 GiB) | `2147483648` | error `not enough memory` |
 | a table filled with 2^25 integers | `33554432` | `33554432` |
 
-`not enough memory` is an ordinary Lua error: `pcall` catches it and the instance survives, keeping its grown memory.
+`not enough memory` is an ordinary Lua error: `pcall` catches it and the instance survives.
 `luaL_Buffer` copies on growth, so a single string tops out between 256 MiB and 1 GiB. Test:
 `memoryCapIsAnOrdinaryLuaError`.
+
+**Memory kept after growth (fixed).** Wasm memory never shrinks, and Chicory has no way to release it, so an instance
+that grew kept that `byte[]` (up to ~2 GiB of JVM heap) for its life. After an eval leaves memory above
+`maxRetainedBytes` (a constructor argument, default 128 MiB), `WasmValkeyLua` now builds a fresh instance from the
+module it compiled once. Each eval already runs in a fresh `lua_State`, so the only state a script can observe in the
+old instance is Valkey's `rand.c` PRNG, which lives as long as the instance on Valkey and JNI; `lua/valkey_rand.c`
+exports it and the rebuild copies it over. A rebuild costs about 230 µs and allocates about 8.3 MiB (the initial memory,
+mostly the C stack), measured with `RebuildBench` (JMH, Apple M2 Pro, JDK 25). Test:
+`memoryAboveMaxRetainedIsReleasedAndRandomContinues`, which fails if the PRNG state is not carried.
 
 ## 6. The eval reply and the C library
 
