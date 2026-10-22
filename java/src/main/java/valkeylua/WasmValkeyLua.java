@@ -18,6 +18,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
 
 /**
@@ -32,6 +33,7 @@ public final class WasmValkeyLua extends ValkeyLua {
     private final ServerInfo info;
     private final long maxRetainedBytes;
     private Instance instance;
+    private static final boolean X86 = Set.of("amd64", "x86_64").contains(System.getProperty("os.arch"));
 
     /** Default for maxRetainedBytes: scripts are expected to be small. */
     public static final long DEFAULT_MAX_RETAINED_BYTES = 128L << 20;
@@ -86,6 +88,7 @@ public final class WasmValkeyLua extends ValkeyLua {
                 .withStart(false)
                 .build();
         instance.export("_initialize").apply();
+        if (X86) instance.export("set_x86_cast").apply(1);
         setServerInfo(info);
         if (old != null) instance.export("set_rand_state").apply(old.export("rand_state").apply()[0]);
     }

@@ -111,7 +111,6 @@ hosts" in `ValkeyLuaTest` pin Valkey's values on both backends. What remains:
 | Memory accounting and GC timing | 32-bit pointers make objects smaller, so `collectgarbage('count')` figures, collector timing and weak-table clearing differ. |
 | `tostring` address width | 32-bit addresses (`table: 0x1e3f0`). Cosmetic. |
 | JVM thread stack bounds deep recursion | Valkey's own nesting limits need 512 KiB (every default meets it). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern backtracking, converting a nested return value) is bounded by the JVM stack: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the instance where Valkey returns a table, and returning a table nested about 3650 deep (4280 at 2 MiB) throws `ChicoryException` and poisons it where Valkey replies (or, from about 8000, sends `reached lua stack limit`). |
-| Out-of-range number returned | `(long long)` of the double saturates: `return 2^63` gives `:9223372036854775807`, `1/0` and `-1/0` the int64 limits, `0/0` gives `:0`. That matches JNI and Valkey on arm64; on x86-64 they give `:-9223372036854775808` for all of these (the cast is undefined in C). |
 | String collation | Lua compares strings with `strcoll`. `lua.wasm` always uses the C locale (byte order), as do Valkey's official Docker images. A server whose `locale-collate` or environment names a language locale such as `en_US.UTF-8` orders strings differently (`'a' < 'B'`, `table.sort`). JNI follows the JVM process's locale through the host's C library, so it matches Wasm under `C` but not glibc under a language locale. |
 | `string.dump` output | Headers record a 4-byte `size_t`, so dumps differ in bytes and length. |
 | `pairs` order over table- or function-keyed tables | Those keys hash by address, so iteration order differs. |
@@ -208,7 +207,7 @@ backends (`lua/valkey_reply.c`, ported from `script_lua.c`'s `luaReplyToServerRe
 | Script returns | Reply |
 |---|---|
 | string | bulk `$<len>`, binary-safe |
-| number | `:` + the double cast to `long long` (truncates; see "Where the backends differ" for out-of-range values) |
+| number | `:` + the double cast to `long long` (truncates; out of range or NaN follows the host CPU as Valkey does: arm64 saturates with NaN as 0, x86-64 gives `INT64_MIN`) |
 | `true` | `:1` |
 | `false` | `$-1`; `:0` after the script called `setresp(3)` (each `eval` starts at RESP 2) |
 | `nil`, a function, userdata, a thread | `$-1` |

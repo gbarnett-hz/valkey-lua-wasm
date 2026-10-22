@@ -12,20 +12,22 @@ x86_64 (emulated on Apple silicon).
 
 ## Open gaps
 
-| Gap | What a script sees | Backend | § |
-|---|---|---|---|
-| Memory cap | Lua data is capped just under 2 GiB: `not enough memory`, catchable. If building the reply runs out, `eval` throws and poisons the instance. Valkey has no Lua-specific limit. | Wasm | 5 |
-| Unlimited recursion | Recursion Valkey does not limit (`cmsgpack.unpack` nesting, pattern backtracking, nested return values) is bounded by the JVM thread stack: the instance is poisoned. | Wasm | 4 |
-| String collation under a language locale | Wasm always collates in byte order, as Valkey's official images do. A server whose `locale-collate` or environment names a locale such as `en_US.UTF-8` orders strings differently (`'a' < 'B'`, `table.sort`). | Wasm | 6 |
-| Out-of-range number returned | `return 2^63`, `1/0`, `-1/0`, `0/0` saturate on Wasm; Valkey matches on arm64 but gives `INT64_MIN` on x86-64. | Wasm on x86-64 | 6 |
-| Memory accounting and GC timing | `collectgarbage('count')` is smaller, so the collector runs and weak tables clear at different points. | Wasm | 2 |
-| `tostring` address width | `table: 0x1e3f0`, not a 64-bit address. Cosmetic. | Wasm | 2 |
-| `string.dump` output | Different bytes and length (98, not 106, for `function() return 'abc' end`). | Wasm | 2 |
-| `pairs` order over table- or function-keyed tables | Those keys hash by address, so the order differs. | Wasm | 2 |
+Ranked by how likely a script is to see the difference and what it costs when it does. None blocks ordinary
+scripts; the first two decide whether an instance stays usable on pathological input, not what a script computes.
+
+| Gap | What a script sees | Backend | Verdict | § |
+|---|---|---|---|---|
+| Unlimited recursion | Recursion Valkey does not limit (`cmsgpack.unpack` nesting, pattern backtracking, nested return values) is bounded by the JVM thread stack: the instance is poisoned. | Wasm | Blocker only if scripts unpack untrusted msgpack. Reaching it takes msgpack nested 1000–3000 deep, a pattern of thousands of items (backtracking nests per pattern item, not per input character) or a reply nested about 3600 deep. The embedder must rebuild a poisoned instance either way. | 4 |
+| Memory cap | Lua data is capped just under 2 GiB: `not enough memory`, catchable. If building the reply runs out, `eval` throws and poisons the instance. Valkey has no Lua-specific limit. | Wasm | Blocker only for scripts that build hundreds of MiB in Lua. One string tops out between 256 MiB and 1 GiB, and Valkey's default `proto-max-bulk-len` (512 MB) keeps a value from `server.call` under that. Usually an ordinary, catchable error; only running out while building the reply poisons. | 5 |
+| libm results | `math.sin`, `math.exp` and so on could differ in the last digit under `string.format('%.17g', x)`. Not probed. | Wasm | OK; `tostring`'s `%.14g` hides a last-bit difference. Probe against glibc on Linux (JNI on macOS uses Apple's libm, so it is not the reference). | 6 |
+| String collation under a language locale | Wasm always collates in byte order, as Valkey's official images do. A server whose `locale-collate` or environment names a locale such as `en_US.UTF-8` orders strings differently (`'a' < 'B'`, `table.sort`). | Wasm | OK; differs only on a server configured with a language locale. | 6 |
+| Memory accounting and GC timing | `collectgarbage('count')` is smaller, so the collector runs and weak tables clear at different points. | Wasm | OK; allocator-dependent, so already differs between Valkey builds. | 2 |
+| `pairs` order over table- or function-keyed tables | Those keys hash by address, so the order differs. | Wasm | OK; address-dependent on Valkey too. String- and number-keyed order is unaffected. | 2 |
+| `string.dump` output | Different bytes and length (98, not 106, for `function() return 'abc' end`). | Wasm | OK. | 2 |
+| `tostring` address width | `table: 0x1e3f0`, not a 64-bit address. Cosmetic. | Wasm | OK; addresses differ between servers anyway. | 2 |
 
 Addresses, `pairs` order over such keys and GC timing depend on the allocator, so two Valkey servers already differ
-on them; no backend can match them. The ones a script can actually rely on and hit are the memory cap and recursion depth;
-collation only on a server configured with a language locale.
+on them; no backend can match them.
 
 ## Fixed
 
@@ -37,6 +39,7 @@ collation only on a server configured with a language locale.
 | `tonumber(s, base)` through `unsigned long` | `lbaselib.c` patch | `tonumberWithBaseIs64Bit` | 1 |
 | `collectgarbage('step', n)` wraps | `lapi.c` patch | `collectgarbageStepSizeIs64Bit` | 3 |
 | 64 KiB C stack trapped before Valkey's nesting limits | 8 MiB C stack | `nestingRaisesValkeysErrors`, `nestingErrorsAtMinimumThreadStack` | 4 |
+| Out-of-range number returned: Wasm saturated, Valkey on x86-64 gives `INT64_MIN` | On an x86-64 host, `WasmValkeyLua` sets `lua.wasm`'s x86 cast mode | `numberCastFollowsHardware` | 6 |
 | Memory kept after growth: Wasm memory never shrinks, so an instance kept up to ~2 GiB of JVM heap for its life | Rebuild the instance after an eval leaves memory above `maxRetainedBytes` (default 128 MiB), carrying `math.random`'s state over | `memoryAboveMaxRetainedIsReleasedAndRandomContinues` | 5 |
 | JNI killed the JVM on deep C recursion; on Linux before Valkey's own limits | evals run on pooled 8 MiB threads | `nestingRaisesValkeysErrors`, `nestingErrorsAtMinimumThreadStack`, `recursionValkeyDoesNotLimitUsesValkeySizedStack` | 4 |
 
@@ -252,11 +255,13 @@ mostly the C stack), measured with `RebuildBench` (JMH, Apple M2 Pro, JDK 25). T
 
 `eval` returns the RESP2 reply built by `lua/valkey_reply.c` on both backends, so the bytes match except for:
 
-- **Out-of-range numbers** (probed). A returned number becomes `:` + `(long long)` of the double, which is undefined
-  in C when out of range or NaN. arm64 and Wasm (`i64.trunc_sat_f64_s`) saturate, NaN giving 0; x86-64 gives
-  `INT64_MIN`. So on x86-64, Valkey and JNI give `:-9223372036854775808` for `2^63`, `1/0`, `-1/0` and `0/0`, where
-  Wasm gives `:9223372036854775807`, `:9223372036854775807`, `:-9223372036854775808` and `:0`. Tests:
-  `numberCastSaturates` (Wasm), `numberCastFollowsHardware` (JNI).
+- **Out-of-range numbers** (probed, fixed). A returned number becomes `:` + `(long long)` of the double, which is
+  undefined in C when out of range or NaN, so Valkey replies with what its CPU gives. arm64 saturates, NaN giving 0, so
+  `2^63`, `1/0`, `-1/0` and `0/0` give `:9223372036854775807`, `:9223372036854775807`, `:-9223372036854775808` and
+  `:0`; x86-64 (`cvttsd2si`) gives `:-9223372036854775808` for all four. Wasm's `i64.trunc_sat_f64_s` saturates like
+  arm64, so on an x86-64 host `WasmValkeyLua` calls `lua.wasm`'s `set_x86_cast`, which makes the reply return
+  `INT64_MIN` for those values. Both backends now match Valkey on the host's CPU. Test: `numberCastFollowsHardware`
+  (shared).
 - **String collation** (probed). `<` on strings and `table.sort` call `strcoll` (`lvm.c:211`). Valkey sets
   `LC_COLLATE` from `locale-collate` (default `""`, the environment; `server.c`, `config.c`). wasi-libc has only the C
   locale, so Wasm collates in byte order. So does Valkey in its official images: they set no `LANG`, so Debian-slim
