@@ -597,7 +597,7 @@ abstract class ValkeyLuaTest {
     /*
      * Valkey runs on 64-bit hosts, where lua_Integer (ptrdiff_t), C long and size_t are 64-bit. lua.wasm is wasm32,
      * patched (lua/patches) so that every value derived from a Lua integer is 64-bit too. These pin 64-bit Valkey's
-     * values on both backends; see wasm-difference.md.
+     * values on both backends; see gaps.md.
      */
 
     @Test
@@ -674,7 +674,7 @@ abstract class ValkeyLuaTest {
 
     /*
      * Valkey's own nesting limits (cjson's 1000 levels, LUAI_MAXCCALLS of 200) must fire before any stack runs out:
-     * lua.wasm's C stack, or the JVM thread stack Chicory's compiled code runs on. See wasm-difference.md section 7.
+     * lua.wasm's C stack, or the JVM thread stack Chicory's compiled code runs on. See gaps.md section 4.
      */
 
     static final String[][] NESTING = {

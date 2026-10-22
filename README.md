@@ -41,12 +41,12 @@ skill's source and content hash, not a commit, so a restore fetches upstream's c
 - The module exports `eval(src_ptr, src_len, kv_ptr, kv_len) -> status` and `result_ptr`/`result_len`.
 - 64-bit integers, as on Valkey: `-DLUA_USELONGLONG`, `-DSTRUCT_INT='long long'` and six patches in `lua/patches/`
   (`luaconf.h`, `lua_struct.c`, `lbaselib.c`, `lstrlib.c`, `lua_cmsgpack.c`, `lapi.c`), applied with `patch -F 0` so one that
-  no longer applies exactly fails the build. What each fixes is in [wasm-difference.md](wasm-difference.md).
+  no longer applies exactly fails the build. What each fixes is in [gaps.md](gaps.md).
 - 8 MiB C stack (`-Wl,-z,stack-size=8388608`), so Valkey's own nesting limits (cjson's 1000 levels, `C stack
   overflow`) fire before it runs out. Those need at least 512 KiB of JVM thread stack; every JVM default meets this
   (1 MiB on Linux x86_64, 2 MiB on macOS arm64). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern
   backtracking) is bounded by the JVM thread stack instead: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the
-  instance where Valkey returns a table. Depths per stack size are in [wasm-difference.md](wasm-difference.md)
+  instance where Valkey returns a table. Depths per stack size are in [gaps.md](gaps.md)
   section 7.
 
 ## JNI backend
@@ -95,7 +95,7 @@ JNI-specific hazards handled in `JniValkeyLua`:
 
 ## Where the backends differ
 
-Found by diffing probe scripts between the two backends; [wasm-difference.md](wasm-difference.md) has every case, the
+Found by diffing probe scripts between the two backends; [gaps.md](gaps.md) has every case, the
 fix for each and its test. `lua.wasm` is wasm32, so `lua_Integer`, `long` and `size_t` were 32-bit; the patches above
 make every value derived from a Lua integer 64-bit, and the shared tests after the comment "Valkey runs on 64-bit
 hosts" in `ValkeyLuaTest` pin Valkey's values on both backends. What remains:
