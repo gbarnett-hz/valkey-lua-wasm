@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -12,6 +13,17 @@ import java.util.function.Supplier;
  * {@link WasmValkeyLua} (lua.wasm on Chicory) and {@link JniValkeyLua} (native Lua through luajava). Not thread-safe.
  */
 public abstract sealed class ValkeyLua permits WasmValkeyLua, JniValkeyLua {
+
+    /**
+     * C's conversion of an out-of-range or NaN double to an integer is undefined, so Valkey gets its CPU's result:
+     * arm64 saturates (NaN gives 0), as Java's casts do; x86-64 gives INT_MIN/LLONG_MIN.
+     */
+    static final boolean X86 = Set.of("amd64", "x86_64").contains(System.getProperty("os.arch"));
+
+    /** C's (int) of a double on this CPU. */
+    static int d2i(double d) {
+        return X86 && !(d > -0x1p31 - 1 && d < 0x1p31) ? Integer.MIN_VALUE : (int) d;
+    }
 
     /**
      * reply is the RESP2 reply Valkey would send the client. ok is false when the script raised, failed to compile, or

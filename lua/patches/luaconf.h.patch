@@ -9,3 +9,16 @@
  
  
  /*
+@@ -578,7 +578,11 @@
+ /* this option always works, but may be slow */
+ #else
+ #define lua_number2int(i,d)	((i)=(int)(d))
+-#define lua_number2integer(i,d)	((i)=(lua_Integer)(d))
++/* wasm: Valkey gets its CPU's result out of range; these follow the host's (valkey_cvt.c). */
++#define lua_number2integer(i,d)	((i)=valkey_d2ll(d))
++long long valkey_d2ll(double d);
++int valkey_d2i(double d);
++unsigned long long valkey_d2ull(double d);
+ 
+ #endif
+ 

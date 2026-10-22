@@ -207,7 +207,7 @@ backends (`lua/valkey_reply.c`, ported from `script_lua.c`'s `luaReplyToServerRe
 | Script returns | Reply |
 |---|---|
 | string | bulk `$<len>`, binary-safe |
-| number | `:` + the double cast to `long long` (truncates; out of range or NaN follows the host CPU as Valkey does: arm64 saturates with NaN as 0, x86-64 gives `INT64_MIN`) |
+| number | `:` + the double cast to `long long` (truncates; out of range or NaN follows the host CPU as Valkey does: arm64 saturates with NaN as 0, x86-64 gives `INT64_MIN`; so does every other conversion of a number to an integer) |
 | `true` | `:1` |
 | `false` | `$-1`; `:0` after the script called `setresp(3)` (each `eval` starts at RESP 2) |
 | `nil`, a function, userdata, a thread | `$-1` |

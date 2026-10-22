@@ -14,19 +14,6 @@
 #include "lauxlib.h"
 #include "valkey_reply.h"
 
-#ifdef __wasm__
-/* (long long) of an out-of-range or NaN double is undefined in C, so Valkey returns what its CPU's conversion gives.
- * wasm's saturates (NaN gives 0), as arm64's does; the host sets x86 cast mode on x86-64, where cvttsd2si gives
- * INT64_MIN. */
-static int x86_cast;
-__attribute__((export_name("set_x86_cast"))) void set_x86_cast(int on) { x86_cast = on; }
-static long long number2ll(double d) {
-    return x86_cast && !(d >= -0x1p63 && d < 0x1p63) ? LLONG_MIN : (long long)d;
-}
-#else
-#define number2ll(d) ((long long)(d))
-#endif
-
 #define REGISTRY_ERROR_HANDLER_NAME "__ERROR_HANDLER__"
 #define REGISTRY_SCRIPT_RESP_NAME "__SCRIPT_RESP__"
 
@@ -303,7 +290,14 @@ static void luaReplyToServerReply(respBuf *b, int resp_version, lua_State *lua) 
             addReplyLongLong(b, ':', lua_toboolean(lua, -1) ? 1 : 0);
         }
         break;
-    case LUA_TNUMBER: addReplyLongLong(b, ':', number2ll(lua_tonumber(lua, -1))); break;
+    case LUA_TNUMBER: {
+        /* Valkey casts to long long; lua_number2integer is that cast natively and follows the host CPU in lua.wasm
+         * (valkey_cvt.c). */
+        lua_Integer n;
+        lua_number2integer(n, lua_tonumber(lua, -1));
+        addReplyLongLong(b, ':', n);
+        break;
+    }
     case LUA_TTABLE:
         /* We need to check if it is an array, an error, or a status reply.
          * Error are returned as a single element table with 'err' field.
