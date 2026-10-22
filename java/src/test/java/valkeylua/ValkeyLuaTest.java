@@ -9,6 +9,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 /** The contract both backends must meet; each subclass supplies one. */
@@ -171,10 +172,37 @@ abstract class ValkeyLuaTest {
         assertThrows(IllegalStateException.class, () -> lua.eval("return 1"));
     }
 
-    static final String[] INT64_EDGES = {"return 2^63", "return -2^63-1e5", "return 1/0", "return -1/0", "return 0/0"};
-
-    List<String> int64Edges() {
-        return java.util.Arrays.stream(INT64_EDGES).map(this::ok).toList();
+    @Test
+    void numberConversionsFollowHardware() {
+        // C's conversion of an out-of-range or NaN double to an integer is undefined, so Valkey gets its CPU's result
+        // (gaps.md section 6). One row per kind of conversion site: script, arm64's reply, x86-64's.
+        String hex = "local function hex(s) return (string.gsub(s, '.', function(c) return string.format('%02x', c:byte()) end)) end ";
+        String[][] cases = {
+            {"return 2^63", integer(Long.MAX_VALUE), integer(Long.MIN_VALUE)},
+            {"return -2^63-1e5", integer(Long.MIN_VALUE), integer(Long.MIN_VALUE)},
+            {"return 1/0", integer(Long.MAX_VALUE), integer(Long.MIN_VALUE)},
+            {"return -1/0", integer(Long.MIN_VALUE), integer(Long.MIN_VALUE)},
+            {"return 0/0", integer(0), integer(Long.MIN_VALUE)},
+            {"return string.sub('abcdef', 2^63)", bulk(""), bulk("abcdef")},
+            {"local ok, v = pcall(select, 2^63, 'a', 'b') return ok and v or 'error'", bulk("b"), bulk("error")},
+            {"return string.format('%c', 2^40)", bulk("\u00ff"), bulk("")},
+            {"return string.format('%d', 0/0)", bulk("0"), bulk("-9223372036854775808")},
+            {"return string.format('%x', -1)", bulk("0"), bulk("ffffffffffffffff")},
+            {"return string.format('%x', 2^64)", bulk("ffffffffffffffff"), bulk("0")},
+            {"return string.format('%x', 0/0)", bulk("0"), bulk("8000000000000000")},
+            {hex + "return hex(cmsgpack.pack(2^63))", bulk("cf7fffffffffffffff"), bulk("ca5f000000")},
+            {hex + "return hex(struct.pack('>i8', 0/0))", bulk("0000000000000000"), bulk("8000000000000000")},
+            {hex + "return hex(struct.pack('>I8', 2^64))", bulk("ffffffffffffffff"), bulk("0000000000000000")},
+            {"local ok, v = pcall(struct.unpack, 'bc0', '\\255abc') return ok and v or 'error'", bulk(""), bulk("error")},
+            {"local ok, v = pcall(cjson.encode, {[2^31] = 1}) return ok and v or 'error'", bulk("error"),
+                bulk("{\"2147483648\":1}")},
+            {"return (pcall(server.set_repl, 0/0))", integer(1), NULL},
+            {"return (pcall(server.log, 0/0, 'x'))", integer(1), NULL},
+        };
+        boolean arm = System.getProperty("os.arch").equals("aarch64");
+        var expected = java.util.Arrays.stream(cases).map(c -> c[0] + " -> " + (arm ? c[1] : c[2])).toList();
+        var actual = java.util.Arrays.stream(cases).map(c -> c[0] + " -> " + ok(c[0])).toList();
+        assertEquals(expected, actual);
     }
 
     @Test
@@ -597,7 +625,7 @@ abstract class ValkeyLuaTest {
     /*
      * Valkey runs on 64-bit hosts, where lua_Integer (ptrdiff_t), C long and size_t are 64-bit. lua.wasm is wasm32,
      * patched (lua/patches) so that every value derived from a Lua integer is 64-bit too. These pin 64-bit Valkey's
-     * values on both backends; see wasm-difference.md.
+     * values on both backends; see gaps.md.
      */
 
     @Test
@@ -674,7 +702,7 @@ abstract class ValkeyLuaTest {
 
     /*
      * Valkey's own nesting limits (cjson's 1000 levels, LUAI_MAXCCALLS of 200) must fire before any stack runs out:
-     * lua.wasm's C stack, or the JVM thread stack Chicory's compiled code runs on. See wasm-difference.md section 7.
+     * lua.wasm's C stack, or the JVM thread stack Chicory's compiled code runs on. See gaps.md section 4.
      */
 
     static final String[][] NESTING = {
@@ -693,6 +721,28 @@ abstract class ValkeyLuaTest {
         }
         assertEquals(bulk("y"), ok("local function f(n) if n==0 then return 'y' end return (string.gsub('x','x',function() return f(n-1) end)) end return f(195)"));
         assertEquals(integer(1), ok("return 1")); // same instance still usable
+    }
+
+    @Test
+    void nestingErrorsAtMinimumThreadStack() throws Exception {
+        // Evals on a 512 KiB thread still reach Valkey's limits: the documented minimum for Wasm; JNI runs Lua on its
+        // own 8 MiB threads (gaps.md section 4).
+        var results = new ArrayList<ValkeyLua.Result>();
+        var failure = new AtomicReference<Throwable>();
+        var t = new Thread(null, () -> {
+            try {
+                var l = create(args -> "+OK\r\n".getBytes(UTF_8));
+                for (String[] c : NESTING) results.add(l.eval(c[0]));
+                results.add(l.eval("return 1"));
+            } catch (Throwable e) {
+                failure.set(e);
+            }
+        }, "eval-512k", 512 * 1024);
+        t.start();
+        t.join();
+        if (failure.get() != null) throw new AssertionError("eval thread failed", failure.get());
+        for (int i = 0; i < NESTING.length; i++) assertEquals(result(false, NESTING[i][1]), results.get(i));
+        assertEquals(result(true, integer(1)), results.get(NESTING.length));
     }
 
     private static byte[] b(String s) {

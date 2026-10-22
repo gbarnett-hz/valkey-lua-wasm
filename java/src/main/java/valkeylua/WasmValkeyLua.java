@@ -4,9 +4,12 @@ import com.dylibso.chicory.compiler.MachineFactoryCompiler;
 import com.dylibso.chicory.runtime.HostFunction;
 import com.dylibso.chicory.runtime.ImportValues;
 import com.dylibso.chicory.runtime.Instance;
+import com.dylibso.chicory.runtime.Machine;
+import com.dylibso.chicory.runtime.Memory;
 import com.dylibso.chicory.wasi.WasiOptions;
 import com.dylibso.chicory.wasi.WasiPreview1;
 import com.dylibso.chicory.wasm.Parser;
+import com.dylibso.chicory.wasm.WasmModule;
 import com.dylibso.chicory.wasm.types.FunctionType;
 import com.dylibso.chicory.wasm.types.ValType;
 
@@ -15,6 +18,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.Function;
 
 /**
  * Runs scripts on Valkey's bundled Lua compiled to lua.wasm (lua/Makefile), on Chicory. If anything escapes eval the
@@ -22,7 +26,15 @@ import java.util.List;
  */
 public final class WasmValkeyLua extends ValkeyLua {
 
-    private final Instance instance;
+    private final WasmModule module;
+    private final Function<Instance, Machine> machineFactory;
+    private final ImportValues imports;
+    private final ServerInfo info;
+    private final long maxRetainedBytes;
+    private Instance instance;
+
+    /** Default for maxRetainedBytes: scripts are expected to be small. */
+    public static final long DEFAULT_MAX_RETAINED_BYTES = 128L << 20;
 
     // Op codes of env.host_call; keep in sync with the enum in valkey_lua.c.
     private static final int OP_CALL = 0, OP_SETRESP = 1, OP_SET_REPL = 2, OP_LOG = 3, OP_ACL_CHECK_CMD = 4;
@@ -32,6 +44,15 @@ public final class WasmValkeyLua extends ValkeyLua {
     }
 
     public WasmValkeyLua(Path wasm, Handler handler, ServerInfo info) {
+        this(wasm, handler, info, DEFAULT_MAX_RETAINED_BYTES);
+    }
+
+    /**
+     * Wasm memory never shrinks, so after an eval leaves it larger than maxRetainedBytes the instance is rebuilt,
+     * releasing the memory. Nothing a script can observe carries over in the old instance except math.random's state,
+     * which is copied.
+     */
+    public WasmValkeyLua(Path wasm, Handler handler, ServerInfo info, long maxRetainedBytes) {
         var wasi = WasiPreview1.builder().withOptions(WasiOptions.builder().build()).build();
         var redis = new HostFunction("env", "host_call",
                 FunctionType.of(List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of()),
@@ -47,15 +68,31 @@ public final class WasmValkeyLua extends ValkeyLua {
                     inst.memory().writeI32((int) args[4], reply.length);
                     return null;
                 });
-        var imports = ImportValues.builder().addFunction(wasi.toHostFunctions()).addFunction(redis).build();
-        // Compile lua.wasm to JVM bytecode at instantiation; ~20-40x faster than the default interpreter.
-        instance = Instance.builder(Parser.parse(wasm))
+        imports = ImportValues.builder().addFunction(wasi.toHostFunctions()).addFunction(redis).build();
+        module = Parser.parse(wasm);
+        // Compile lua.wasm to JVM bytecode once; ~20-40x faster than the default interpreter.
+        machineFactory = MachineFactoryCompiler.compile(module);
+        this.info = info;
+        this.maxRetainedBytes = maxRetainedBytes;
+        rebuild();
+    }
+
+    /** Replaces the instance with a fresh one, dropping its linear memory. */
+    void rebuild() {
+        var old = instance;
+        instance = Instance.builder(module)
                 .withImportValues(imports)
-                .withMachineFactory(MachineFactoryCompiler::compile)
+                .withMachineFactory(machineFactory)
                 .withStart(false)
                 .build();
         instance.export("_initialize").apply();
+        if (X86) instance.export("set_x86_cast").apply(1);
         setServerInfo(info);
+        if (old != null) instance.export("set_rand_state").apply(old.export("rand_state").apply()[0]);
+    }
+
+    long memoryBytes() {
+        return (long) instance.memory().pages() * Memory.PAGE_SIZE;
     }
 
     private void setServerInfo(ServerInfo info) {
@@ -78,6 +115,7 @@ public final class WasmValkeyLua extends ValkeyLua {
         byte[] src = script.getBytes(StandardCharsets.UTF_8);
         int ptr = (int) instance.export("alloc").apply(src.length)[0];
         int kvPtr = (int) instance.export("alloc").apply(kv.length)[0];
+        Result result;
         try {
             instance.memory().write(ptr, src);
             instance.memory().write(kvPtr, kv);
@@ -85,11 +123,13 @@ public final class WasmValkeyLua extends ValkeyLua {
             if (status < 0) throw new IllegalStateException("reply conversion failed");
             int resPtr = (int) instance.export("result_ptr").apply()[0];
             int resLen = (int) instance.export("result_len").apply()[0];
-            return new Result(status == 0, instance.memory().readBytes(resPtr, resLen));
+            result = new Result(status == 0, instance.memory().readBytes(resPtr, resLen));
         } finally {
             instance.export("dealloc").apply(ptr);
             instance.export("dealloc").apply(kvPtr);
         }
+        if (memoryBytes() > maxRetainedBytes) rebuild();
+        return result;
     }
 
     private static byte[] dispatch(Handler h, int op, List<byte[]> args) {

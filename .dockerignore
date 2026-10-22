@@ -1,0 +1,8 @@
+.git
+.claude
+.agents
+lua/.deps
+lua/lua.wasm
+native/.deps
+native/build
+java/target

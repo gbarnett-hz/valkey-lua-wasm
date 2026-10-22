@@ -290,7 +290,14 @@ static void luaReplyToServerReply(respBuf *b, int resp_version, lua_State *lua) 
             addReplyLongLong(b, ':', lua_toboolean(lua, -1) ? 1 : 0);
         }
         break;
-    case LUA_TNUMBER: addReplyLongLong(b, ':', (long long)lua_tonumber(lua, -1)); break;
+    case LUA_TNUMBER: {
+        /* Valkey casts to long long; lua_number2integer is that cast natively and follows the host CPU in lua.wasm
+         * (valkey_cvt.c). */
+        lua_Integer n;
+        lua_number2integer(n, lua_tonumber(lua, -1));
+        addReplyLongLong(b, ':', n);
+        break;
+    }
     case LUA_TTABLE:
         /* We need to check if it is an array, an error, or a status reply.
          * Error are returned as a single element table with 'err' field.

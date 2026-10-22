@@ -54,3 +54,24 @@
    if (find && (lua_toboolean(L, 4) ||  /* explicit request? */
        strpbrk(p, SPECIALS) == NULL)) {  /* or no special characters? */
      /* do a plain search */
+@@ -774,17 +775,17 @@
+       strfrmt = scanformat(L, strfrmt, form);
+       switch (*strfrmt++) {
+         case 'c': {
+-          sprintf(buff, form, (int)luaL_checknumber(L, arg));
++          sprintf(buff, form, valkey_d2i(luaL_checknumber(L, arg)));
+           break;
+         }
+         case 'd':  case 'i': {
+           addintlen(form);
+-          sprintf(buff, form, (LUA_INTFRM_T)luaL_checknumber(L, arg));
++          sprintf(buff, form, valkey_d2ll(luaL_checknumber(L, arg)));
+           break;
+         }
+         case 'o':  case 'u':  case 'x':  case 'X': {
+           addintlen(form);
+-          sprintf(buff, form, (unsigned LUA_INTFRM_T)luaL_checknumber(L, arg));
++          sprintf(buff, form, valkey_d2ull(luaL_checknumber(L, arg)));
+           break;
+         }
+         case 'e':  case 'E': case 'f':

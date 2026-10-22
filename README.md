@@ -10,7 +10,7 @@ API delegated to a `Handler`. Two backends behind one API (`ValkeyLua`) and one 
 | Isolation | Wasm sandbox; nothing native | native code in the JVM; a Lua panic would kill the JVM (guarded, see below) |
 | Integer width | 64-bit, as Valkey (patched; pointers and `size_t` stay 32-bit) | 64-bit, as Valkey |
 | Build | wasi-sdk | host C/C++ compiler, JNI headers |
-| Construct | `new WasmValkeyLua(Path wasm, handler[, info])` | `new JniValkeyLua(handler[, info])` |
+| Construct | `new WasmValkeyLua(Path wasm, handler[, info[, maxRetainedBytes]])` | `new JniValkeyLua(handler[, info])` |
 
 Both give 64-bit Valkey's results; the few remaining differences are in [Where the backends differ](#where-the-backends-differ).
 
@@ -25,6 +25,12 @@ re-extracts Valkey's sources by itself when `VALKEY_SHA` or a file in `lua/patch
 changing its pinned Valkey sources, `rm -rf native/.deps/valkey`.
 On macOS 27 Command Line Tools, clang++ may not find libc++ headers; pass
 `CXXFLAGS="-isystem $(xcrun --show-sdk-path)/usr/include/c++/v1"` to `make -C native`.
+
+The same suite on Linux x86_64, the deployment target (emulated on an arm64 Mac; takes a few minutes):
+
+```sh
+docker build --platform linux/amd64 -t valkey-lua . && docker run --rm --platform linux/amd64 valkey-lua
+```
 
 Both backends run each `eval` in a fresh `lua_State` and are not thread-safe. The shared code (`ValkeyLua`) encodes
 `KEYS`/`ARGV`, turns handler exceptions into `-ERR` replies and poisons the instance when anything escapes `eval`.
@@ -41,13 +47,13 @@ skill's source and content hash, not a commit, so a restore fetches upstream's c
 - The module exports `eval(src_ptr, src_len, kv_ptr, kv_len) -> status` and `result_ptr`/`result_len`.
 - 64-bit integers, as on Valkey: `-DLUA_USELONGLONG`, `-DSTRUCT_INT='long long'` and six patches in `lua/patches/`
   (`luaconf.h`, `lua_struct.c`, `lbaselib.c`, `lstrlib.c`, `lua_cmsgpack.c`, `lapi.c`), applied with `patch -F 0` so one that
-  no longer applies exactly fails the build. What each fixes is in [wasm-difference.md](wasm-difference.md).
+  no longer applies exactly fails the build. What each fixes is in [gaps.md](gaps.md).
 - 8 MiB C stack (`-Wl,-z,stack-size=8388608`), so Valkey's own nesting limits (cjson's 1000 levels, `C stack
   overflow`) fire before it runs out. Those need at least 512 KiB of JVM thread stack; every JVM default meets this
   (1 MiB on Linux x86_64, 2 MiB on macOS arm64). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern
   backtracking) is bounded by the JVM thread stack instead: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the
-  instance where Valkey returns a table. Depths per stack size are in [wasm-difference.md](wasm-difference.md)
-  section 7.
+  instance where Valkey returns a table. Depths per stack size are in [gaps.md](gaps.md)
+  section 4.
 
 ## JNI backend
 
@@ -84,14 +90,13 @@ JNI-specific hazards handled in `JniValkeyLua`:
   backends): a raising `__index` on an error table, which would be a Lua panic on Valkey, throws
   `IllegalStateException` and poisons the instance.
 - The natives are loaded once per JVM.
-- Lua's C code runs on the calling thread's native stack, so a script that recurses deeper than that stack kills the
-  JVM (SIGILL), not just the eval. Measured on macOS arm64: nesting `string.gsub` callbacks 250 deep needs more than
-  512 KiB (768 KiB and up raise Valkey's `C stack overflow`); `string.find(string.rep('a', 20000),
-  string.rep('a?', 20000))` kills the JVM at the 2 MiB default and works at 8 MiB, Valkey's native default.
-  Converting a nested return value also recurses once per level, as on Valkey: at 2 MiB, Valkey's
-  `-ERR reached lua stack limit` (about 8000 levels) fires first; at 1 MiB (the Linux x86-64 default), about 7000
-  levels (`local t = {} for i = 1, 7000 do t = {t} end return t`) kills the JVM. Run JNI evals on threads with
-  Valkey-sized (8 MiB) stacks.
+- Lua's C code runs on the native stack of the thread running it, and overflowing that kills the JVM, not just the
+  eval. So `eval` runs each script on a pooled thread with Valkey's 8 MiB stack and waits for it, whatever the
+  caller's stack: Valkey's own limits (`C stack overflow`, `reached lua stack limit`) fire first, and recursion Valkey
+  doesn't limit (`string.find(string.rep('a', 20000), string.rep('a?', 20000))`) works as on Valkey. Before this,
+  nesting `string.gsub` callbacks killed the JVM at about 110 levels on Linux x86_64's 1 MiB default, before Valkey's
+  limit of 200. The `Handler` therefore runs on that thread, not the caller's: thread-locals set by the caller are not
+  visible to it. See [gaps.md](gaps.md) section 4.
 
 Where JNI differs from Valkey (found by diffing against `valkey-server` at `VALKEY_SHA`; Wasm matches Valkey on both):
 
@@ -103,21 +108,19 @@ Where JNI differs from Valkey (found by diffing against `valkey-server` at `VALK
 
 ## Where the backends differ
 
-Found by diffing probe scripts between the two backends; [wasm-difference.md](wasm-difference.md) has every case, the
+Found by diffing probe scripts between the two backends; [gaps.md](gaps.md) has every case, the
 fix for each and its test. `lua.wasm` is wasm32, so `lua_Integer`, `long` and `size_t` were 32-bit; the patches above
 make every value derived from a Lua integer 64-bit, and the shared tests after the comment "Valkey runs on 64-bit
 hosts" in `ValkeyLuaTest` pin Valkey's values on both backends. What remains:
 
 | Deviation | Wasm |
 |---|---|
-| Memory cap | Chicory allows just under 2 GiB, less the 8 MiB C stack. Past it a script gets the Lua error `not enough memory`, which `pcall` can catch; the instance survives. If building the reply runs out instead (e.g. returning `{s, s}` for a 512 MiB `s`), `eval` throws `IllegalStateException` and poisons the instance. Valkey has no Lua-specific limit. |
+| Memory cap | Chicory allows just under 2 GiB, less the 8 MiB C stack. Past it a script gets the Lua error `not enough memory`, which `pcall` can catch; the instance survives. Wasm memory never shrinks, so after an eval leaves it above `maxRetainedBytes` (default 128 MiB) the instance is rebuilt to release it; scripts can't tell. If building the reply runs out instead (e.g. returning `{s, s}` for a 512 MiB `s`), `eval` throws `IllegalStateException` and poisons the instance. Valkey has no Lua-specific limit. |
 | Memory accounting and GC timing | 32-bit pointers make objects smaller, so `collectgarbage('count')` figures, collector timing and weak-table clearing differ. |
 | `tostring` address width | 32-bit addresses (`table: 0x1e3f0`). Cosmetic. |
 | JVM thread stack bounds deep recursion | Valkey's own nesting limits need 512 KiB (every default meets it). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern backtracking, converting a nested return value) is bounded by the JVM stack: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the instance where Valkey returns a table, and returning a table nested about 3650 deep (4280 at 2 MiB) throws `ChicoryException` and poisons it where Valkey replies (or, from about 8000, sends `reached lua stack limit`). On an 8 MiB thread, 9000 deep still poisons it. |
-| Out-of-range number returned | `(long long)` of the double saturates: `return 2^63` gives `:9223372036854775807`, `1/0` and `-1/0` the int64 limits, `0/0` gives `:0`. That matches JNI and Valkey on arm64; on x86-64 they give `:-9223372036854775808` for all of these (the cast is undefined in C). |
-| String collation | Lua compares strings with `strcoll`. `lua.wasm` always uses the C locale; Valkey (`locale-collate`, default `""`) and JNI use the process locale, so under `en_US.UTF-8` `'a' < 'B'` is true there and false on Wasm, and `table.sort` of strings orders differently. Valkey under the C locale (the official Docker images) gives false, as Wasm. |
+| String collation | Lua compares strings with `strcoll`. `lua.wasm` always uses the C locale (byte order), as do Valkey's official Docker images. A server whose `locale-collate` or environment names a language locale such as `en_US.UTF-8` orders strings differently (`'a' < 'B'`, `table.sort`). JNI follows the JVM process's locale through the host's C library, so it matches Wasm under `C` but not glibc under a language locale. |
 | NaN sign | `tostring(-(0/0))` is `-nan`, as on Linux Valkey (glibc); Valkey and JNI on macOS print `nan`. |
-| Memory kept after growth | Wasm memory never shrinks: an instance that grew near the cap keeps up to ~2 GiB of JVM heap until discarded. |
 | `string.dump` output | Headers record a 4-byte `size_t`, so dumps differ in bytes and length. |
 | `pairs` order over table- or function-keyed tables | Those keys hash by address, so iteration order differs. |
 
@@ -138,8 +141,8 @@ Ported from Valkey's `script_lua.c` (to C in `lua/valkey_lua.c` for Wasm, to Jav
 - Argument validation for every delegated function runs first; the handler only sees requests that passed it.
   `call`/`pcall` arguments follow `luaArgsToServerArgv` (integer numbers print as integers, others via `fpconv_dtoa`).
 - Global patches: `pcall` is Valkey's `luaRedisPcall` wrapper (`{err=}` tables become strings); `math.random` and
-  `math.randomseed` use Valkey's PRNG, so sequences match Valkey for the same seed within one eval (across evals,
-  see "Divergences from Valkey").
+  `math.randomseed` use Valkey's PRNG, so sequences match Valkey for the same seed. Its state lives as long as the
+  instance, as on Valkey, so a sequence (and a `math.randomseed`) carries over to later evals.
 - Globals protection (`lua/valkey_globals.c`, from Valkey's `script_lua.c`/`engine_lua.c`): globals are cut to
   Valkey's allow list (so no `print`, `dofile`, `loadfile`, `newproxy`, `setfenv`, `getfenv` or `debug`), then the
   globals table, every table reachable from it and the basic types' metatables become read-only. Setting a global
@@ -214,7 +217,7 @@ backends (`lua/valkey_reply.c`, ported from `script_lua.c`'s `luaReplyToServerRe
 | Script returns | Reply |
 |---|---|
 | string | bulk `$<len>`, binary-safe |
-| number | `:` + the double cast to `long long` (truncates; see "Where the backends differ" for out-of-range values) |
+| number | `:` + the double cast to `long long` (truncates; out of range or NaN follows the host CPU as Valkey does: arm64 saturates with NaN as 0, x86-64 gives `INT64_MIN`; so does every other conversion of a number to an integer) |
 | `true` | `:1` |
 | `false` | `$-1`; `:0` after the script called `setresp(3)` (each `eval` starts at RESP 2) |
 | `nil`, a function, userdata, a thread | `$-1` |
@@ -337,7 +340,7 @@ exception, never a silently wrong value. An error reply is never "wrong type": i
   (`%`, `~`, `,`, `_`, `#`, `(`, `=`) raises `ERR unexpected reply from handler for server.call`.
 
 Found by diffing 278 probe scripts against `valkey-server` built at `VALKEY_SHA`, Valkey 8.1.10 and 9.0.6, and Redis
-7.2.16 and 8.10.2 (see [wasm-difference.md](wasm-difference.md), "How these were found"); both backends, unless noted:
+7.2.16 and 8.10.2 ([gaps.md](gaps.md) section 8); both backends, unless noted:
 
 - **Error text follows unreleased Valkey.** `VALKEY_SHA` is Valkey's `unstable` branch (version `255.255.255`), where
   Lua is a module and an uncaught error ends `script: on @user_script:1.`. Released Valkey (8.1, 9.0) and Redis send
@@ -347,14 +350,12 @@ Found by diffing 278 probe scripts against `valkey-server` built at `VALKEY_SHA`
   `Write commands are not allowed from read-only scripts.`; unknown flags and engines are rejected). Here the line
   is Lua source, so any script starting with `#!` fails with `Error compiling script (new function):
   user_script:1: unexpected symbol near '#'`.
-- **The PRNG restarts on every eval.** Valkey's PRNG is one process-wide state: on a fresh server three separate
-  `return math.random(100)` evals give 40, 85, 36, and a `math.randomseed` carries over to later scripts. Each eval
-  here starts at seed 0, so the first eval matches and every later one gives 40 again.
 - **No script timeout.** Valkey checks every 100,000 instructions: after the busy threshold other clients get `-BUSY`,
   and `SCRIPT KILL` ends the script with `-ERR Script killed by user with SCRIPT KILL.` (`pcall` can't catch it).
   Here `while true do end` never returns. On Wasm, `Thread.interrupt()` on the eval thread stops it, but
-  `ChicoryInterruptedException` escapes `eval` and poisons the instance. On JNI the thread is still running after
-  `interrupt()`; only ending the process stops it.
+  `ChicoryInterruptedException` escapes `eval` and poisons the instance. On JNI the script keeps running on its pool
+  thread and an interrupted caller keeps waiting (still running 5 s after `interrupt()`); only ending the process
+  stops it.
 - **Script-context rules are the Handler's job.** Valkey runs script commands in script mode; a handler that forwards
   them to a server as an ordinary client does not. Probed with such a pass-through: `MULTI` returns `+OK` and every
   later command on that connection is queued, `EVAL` and `SUBSCRIBE` run, `CLIENT REPLY OFF` leaves the connection
