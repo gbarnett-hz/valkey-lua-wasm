@@ -64,3 +64,5 @@ cd java && mvn test -Dtest='*ValkeyLuaTest#testName'       # one shared test, bo
   error rewrites matched on prefix only), and backend notes. Changes to behaviour usually need a README update.
 - `wasm-difference.md`: every Wasm/Valkey difference found, its fix and test, and what remains.
 - `docs/superpowers/specs/` and `docs/superpowers/plans/`: design docs and implementation plans.
+- `docs/memory-analysis.md`: Wasm vs JNI memory measurements; harness and raw data in `bench/` (JMH + forked
+  footprint probe, needs `mvn install` of `java/` first).
