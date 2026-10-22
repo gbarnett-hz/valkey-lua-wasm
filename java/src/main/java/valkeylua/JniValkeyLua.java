@@ -15,6 +15,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.regex.Pattern;
 
 import party.iroiro.luajava.JFunction;
@@ -59,6 +63,17 @@ public final class JniValkeyLua extends ValkeyLua {
 
     /** Consumes the top of the stack; null if the conversion raised. */
     private static native byte[] evalReply(long L, int kind);
+
+    // Lua's C code recurses on the native stack of the thread running it, and overflowing that kills the JVM. Evals
+    // run on these threads with Valkey's 8 MiB (its main thread's default), so Valkey's own nesting limits fire first
+    // whatever the caller's stack (1 MiB on Linux x86_64, where str_gsub's 8 KiB luaL_Buffer outruns it at about 110
+    // nested callbacks; see gaps.md section 4). Idle threads exit after a minute.
+    private static final long LUA_STACK_SIZE = 8L << 20;
+    private static final ExecutorService LUA_THREADS = Executors.newCachedThreadPool(r -> {
+        var t = new Thread(null, r, "valkey-lua", LUA_STACK_SIZE);
+        t.setDaemon(true);
+        return t;
+    });
 
     private static final int EVAL_OK = 0, EVAL_SETUP = 1, EVAL_COMPILE = 2, EVAL_RUN = 3;
 
@@ -495,8 +510,29 @@ public final class JniValkeyLua extends ValkeyLua {
     }
 
     /** Runs a script in a fresh state, as the Wasm variant does, and returns Valkey's RESP2 reply. */
+    /** Runs the eval on a Valkey-sized stack and waits for it, even if interrupted: the instance isn't thread-safe. */
     @Override
     Result evalUnchecked(String script, byte[] kv) {
+        Future<Result> f = LUA_THREADS.submit(() -> evalOnLuaThread(script, kv));
+        boolean interrupted = false;
+        try {
+            while (true) {
+                try {
+                    return f.get();
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                } catch (ExecutionException e) {
+                    if (e.getCause() instanceof RuntimeException r) throw r;
+                    if (e.getCause() instanceof Error r) throw r;
+                    throw new IllegalStateException(e.getCause());
+                }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+    }
+
+    private Result evalOnLuaThread(String script, byte[] kv) {
         var lua = new Lua51();
         try {
             long L = lua.getPointer();

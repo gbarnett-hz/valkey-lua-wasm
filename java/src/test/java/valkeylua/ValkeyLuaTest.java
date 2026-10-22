@@ -9,6 +9,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 /** The contract both backends must meet; each subclass supplies one. */
@@ -693,6 +694,28 @@ abstract class ValkeyLuaTest {
         }
         assertEquals(bulk("y"), ok("local function f(n) if n==0 then return 'y' end return (string.gsub('x','x',function() return f(n-1) end)) end return f(195)"));
         assertEquals(integer(1), ok("return 1")); // same instance still usable
+    }
+
+    @Test
+    void nestingErrorsAtMinimumThreadStack() throws Exception {
+        // Evals on a 512 KiB thread still reach Valkey's limits: the documented minimum for Wasm; JNI runs Lua on its
+        // own 8 MiB threads (gaps.md section 4).
+        var results = new ArrayList<ValkeyLua.Result>();
+        var failure = new AtomicReference<Throwable>();
+        var t = new Thread(null, () -> {
+            try {
+                var l = create(args -> "+OK\r\n".getBytes(UTF_8));
+                for (String[] c : NESTING) results.add(l.eval(c[0]));
+                results.add(l.eval("return 1"));
+            } catch (Throwable e) {
+                failure.set(e);
+            }
+        }, "eval-512k", 512 * 1024);
+        t.start();
+        t.join();
+        if (failure.get() != null) throw new AssertionError("eval thread failed", failure.get());
+        for (int i = 0; i < NESTING.length; i++) assertEquals(result(false, NESTING[i][1]), results.get(i));
+        assertEquals(result(true, integer(1)), results.get(NESTING.length));
     }
 
     private static byte[] b(String s) {

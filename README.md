@@ -26,6 +26,12 @@ changing its pinned Valkey sources, `rm -rf native/.deps/valkey`.
 On macOS 27 Command Line Tools, clang++ may not find libc++ headers; pass
 `CXXFLAGS="-isystem $(xcrun --show-sdk-path)/usr/include/c++/v1"` to `make -C native`.
 
+The same suite on Linux x86_64, the deployment target (emulated on an arm64 Mac; takes a few minutes):
+
+```sh
+docker build --platform linux/amd64 -t valkey-lua . && docker run --rm --platform linux/amd64 valkey-lua
+```
+
 Both backends run each `eval` in a fresh `lua_State` and are not thread-safe. The shared code (`ValkeyLua`) encodes
 `KEYS`/`ARGV`, turns handler exceptions into `-ERR` replies and poisons the instance when anything escapes `eval`.
 
@@ -47,7 +53,7 @@ skill's source and content hash, not a commit, so a restore fetches upstream's c
   (1 MiB on Linux x86_64, 2 MiB on macOS arm64). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern
   backtracking) is bounded by the JVM thread stack instead: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the
   instance where Valkey returns a table. Depths per stack size are in [gaps.md](gaps.md)
-  section 7.
+  section 4.
 
 ## JNI backend
 
@@ -84,14 +90,13 @@ JNI-specific hazards handled in `JniValkeyLua`:
   backends): a raising `__index` on an error table, which would be a Lua panic on Valkey, throws
   `IllegalStateException` and poisons the instance.
 - The natives are loaded once per JVM.
-- Lua's C code runs on the calling thread's native stack, so a script that recurses deeper than that stack kills the
-  JVM (SIGILL), not just the eval. Measured on macOS arm64: nesting `string.gsub` callbacks 250 deep needs more than
-  512 KiB (768 KiB and up raise Valkey's `C stack overflow`); `string.find(string.rep('a', 20000),
-  string.rep('a?', 20000))` kills the JVM at the 2 MiB default and works at 8 MiB, Valkey's native default.
-  Converting a nested return value also recurses once per level, as on Valkey: at 2 MiB, Valkey's
-  `-ERR reached lua stack limit` (about 8000 levels) fires first; at 1 MiB (the Linux x86-64 default), about 7000
-  levels (`local t = {} for i = 1, 7000 do t = {t} end return t`) kills the JVM. Run JNI evals on threads with
-  Valkey-sized (8 MiB) stacks.
+- Lua's C code runs on the native stack of the thread running it, and overflowing that kills the JVM, not just the
+  eval. So `eval` runs each script on a pooled thread with Valkey's 8 MiB stack and waits for it, whatever the
+  caller's stack: Valkey's own limits (`C stack overflow`, `reached lua stack limit`) fire first, and recursion Valkey
+  doesn't limit (`string.find(string.rep('a', 20000), string.rep('a?', 20000))`) works as on Valkey. Before this,
+  nesting `string.gsub` callbacks killed the JVM at about 110 levels on Linux x86_64's 1 MiB default, before Valkey's
+  limit of 200. The `Handler` therefore runs on that thread, not the caller's: thread-locals set by the caller are not
+  visible to it. See [gaps.md](gaps.md) section 4.
 
 ## Where the backends differ
 

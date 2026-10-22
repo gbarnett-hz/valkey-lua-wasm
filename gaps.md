@@ -7,14 +7,15 @@ hosts have 64-bit `ptrdiff_t`, `long`, `size_t` and pointers, wasm32 has 32-bit 
 are identical.
 
 Results marked "probed" were observed by running the same script on both backends in one JVM; the "Wasm" columns in
-fixed sections show the build before the fix.
+fixed sections show the build before the fix. The suite runs on macOS arm64 and, through the `Dockerfile`, on Linux
+x86_64 (emulated on Apple silicon).
 
 ## Open gaps
 
 | Gap | What a script sees | Backend | § |
 |---|---|---|---|
 | Memory cap | Lua data is capped just under 2 GiB: `not enough memory`, catchable. If building the reply runs out, `eval` throws and poisons the instance. Valkey has no Lua-specific limit. | Wasm | 5 |
-| Unlimited recursion | Recursion Valkey does not limit (`cmsgpack.unpack` nesting, pattern backtracking, nested return values) is bounded by the JVM thread stack: Wasm poisons the instance, JNI kills the JVM. | both | 4 |
+| Unlimited recursion | Recursion Valkey does not limit (`cmsgpack.unpack` nesting, pattern backtracking, nested return values) is bounded by the JVM thread stack: the instance is poisoned. | Wasm | 4 |
 | String collation under a language locale | Wasm always collates in byte order, as Valkey's official images do. A server whose `locale-collate` or environment names a locale such as `en_US.UTF-8` orders strings differently (`'a' < 'B'`, `table.sort`). | Wasm | 6 |
 | Out-of-range number returned | `return 2^63`, `1/0`, `-1/0`, `0/0` saturate on Wasm; Valkey matches on arm64 but gives `INT64_MIN` on x86-64. | Wasm on x86-64 | 6 |
 | Memory accounting and GC timing | `collectgarbage('count')` is smaller, so the collector runs and weak tables clear at different points. | Wasm | 2 |
@@ -37,6 +38,7 @@ collation only on a server configured with a language locale.
 | `collectgarbage('step', n)` wraps | `lapi.c` patch | `collectgarbageStepSizeIs64Bit` | 3 |
 | 64 KiB C stack trapped before Valkey's nesting limits | 8 MiB C stack | `nestingRaisesValkeysErrors`, `nestingErrorsAtMinimumThreadStack` | 4 |
 | Memory kept after growth: Wasm memory never shrinks, so an instance kept up to ~2 GiB of JVM heap for its life | Rebuild the instance after an eval leaves memory above `maxRetainedBytes` (default 128 MiB), carrying `math.random`'s state over | `memoryAboveMaxRetainedIsReleasedAndRandomContinues` | 5 |
+| JNI killed the JVM on deep C recursion; on Linux before Valkey's own limits | evals run on pooled 8 MiB threads | `nestingRaisesValkeysErrors`, `nestingErrorsAtMinimumThreadStack`, `recursionValkeyDoesNotLimitUsesValkeySizedStack` | 4 |
 
 `stringIndicesBeyond32BitsAreNotTruncated` and `structUnpackPositionIs64Bit` also passed before the fix; they guard
 against a partial patch.
@@ -182,10 +184,42 @@ level; Valkey stops at about 8000 with `-ERR reached lua stack limit`. For
 | Wasm | 3638 / 3656: `ChicoryException`, instance poisoned | 4270 / 4288: same |
 | JNI | 6984 / 7000: JVM killed (SIGILL) | `reached lua stack limit` at 8000, as Valkey |
 
-JNI is worse here: luajava runs Lua on the thread's native stack, so overflowing it kills the JVM. The 250-level
-`string.gsub` case does so at 512 KiB, the `string.find` case at N = 20000 at the 2 MiB default. Running evals on a
-dedicated large-stack thread would remove both; not done. Tests: `nestingErrorsAtMinimumThreadStack` (Wasm, 512 KiB
-thread), `deepReplyNestingPoisons` (Wasm, 1 MiB thread).
+Tests: `nestingErrorsAtMinimumThreadStack` (both, 512 KiB caller thread), `deepReplyNestingPoisons` (Wasm, 1 MiB
+thread).
+
+**Fixed: JNI ran Lua on the caller's stack.** luajava runs Lua's C code on the native stack of the calling thread, and
+overflowing it kills the JVM (SIGSEGV or SIGILL, no exception). On macOS arm64 that took recursion Valkey doesn't
+limit: the `string.find` case above at N = 20000 at the 2 MiB default, or returning a table nested 7000 deep at 1 MiB.
+On Linux it also beat Valkey's own limit, so `nestingRaisesValkeysErrors` killed the JVM on x86_64. Each nested
+`string.gsub` callback holds a `luaL_Buffer`, whose size is `BUFSIZ`: 8192 bytes in glibc, 1024 on macOS. So on Linux
+each level takes about 8 KiB more stack, whatever the CPU (Linux arm64 too). Probed on Linux x86_64, deepest nesting
+of the `string.gsub` case that worked:
+
+| Caller thread stack | 512 KiB | 1 MiB (Linux x86_64 default) | 2 MiB |
+|---|---|---|---|
+| Deepest that worked | 53 | 109 | 199 |
+
+Valkey raises `C stack overflow` at 200, on a main thread with 8 MiB. So `JniValkeyLua.eval` now hands each eval to a
+pooled thread with an 8 MiB stack (a cached pool of daemon threads; idle ones exit after a minute) and waits for it,
+uninterruptibly, since the instance is not thread-safe. Exceptions are rethrown on the caller's thread. Valkey's
+errors now fire first whatever the caller's stack, `string.find` at N = 20000 works and a table nested 10000 deep
+replies with `reached lua stack limit`, as on Valkey.
+
+What it costs, for choosing a backend:
+
+- **The `Handler` runs on the pool thread**, not the caller's. Thread-locals the caller set (a transaction, a security
+  context, logging MDC) are not visible to `server.call`; the embedder has to pass them in explicitly. Wasm runs the
+  `Handler` on the caller's thread.
+- **A thread handoff per eval**: two context switches. Not measured; measure it with JMH before relying on JNI for
+  short, frequent scripts.
+- **Native memory**: 8 MiB of stack reserved per eval running at once (committed only as it is touched), plus pool
+  threads kept for a minute after use.
+- **A caller interrupt does not stop a script**: the caller keeps waiting and its interrupt flag is restored afterwards.
+  JNI could not stop a running script before either; script timeouts and `SCRIPT KILL` are not covered (README).
+
+The alternative, requiring callers to run JNI evals on 8 MiB threads themselves, avoids the handoff but leaves a JVM
+crash one misconfigured thread pool away; a virtual thread runs native code on its carrier's stack, which the
+caller does not size.
 
 ## 5. Memory cap (open)
 
@@ -240,7 +274,7 @@ Judged against the gaps a script can hit: the memory cap and recursion depth (co
 | Option | Fidelity | Fixes | Main risk |
 |---|---|---|---|
 | Wasm on Chicory (current) | Valkey's C, patched | — | memory cap; recursion depth |
-| JNI through luajava (current) | the reference | — | native code in the JVM: a Lua crash or memory-safety bug takes down or corrupts it; a native build per platform |
+| JNI through luajava (current) | the reference | — | native code in the JVM: a Lua crash or memory-safety bug takes down or corrupts it; a native build per platform; each eval runs on a pooled 8 MiB thread, so the `Handler` does not see the caller's thread-locals (§4) |
 | FFM instead of JNI | as JNI | none of the Wasm gaps | needs Java 22; the build targets 17 |
 | wasm64 on GraalWasm | Valkey's C, fewer patches | pointer width, perhaps the cap | experimental; no wasm64 libc; heavy dependency |
 | An existing Java Lua | another implementation, mostly another Lua version | — | we would own a fork |

@@ -13,6 +13,7 @@ make -C native   # luajava JNI glue + Valkey sources → native/build/liblua51<a
 cd java && mvn test                                        # whole suite, both backends (needs both builds above)
 cd java && mvn test -Dtest='WasmValkeyLuaTest#testName'    # one test, one backend
 cd java && mvn test -Dtest='*ValkeyLuaTest#testName'       # one shared test, both backends
+docker build --platform linux/amd64 -t valkey-lua . && docker run --rm --platform linux/amd64 valkey-lua  # Linux x86_64
 ```
 
 - macOS 27 Command Line Tools: `make -C native CXXFLAGS="-isystem $(xcrun --show-sdk-path)/usr/include/c++/v1"`.
@@ -36,6 +37,8 @@ cd java && mvn test -Dtest='*ValkeyLuaTest#testName'       # one shared test, bo
 - JNI rules: a Lua error is a C++ exception and must never unwind through Java frames. Callbacks raise by returning
   `-1` with the error on the stack, and lauxlib error helpers are rebuilt in Java. Every Java→Lua call is protected
   (an unprotected error reaches luajava's panic handler and kills the JVM). luajava's `java` global is removed per state.
+- `JniValkeyLua` runs each eval on a pooled 8 MiB-stack thread (overflowing a native stack kills the JVM; Linux's 8 KiB
+  `BUFSIZ` made the 1 MiB default overflow before Valkey's limits), so the `Handler` runs off the caller's thread.
 - Globals protection is C shared by both builds (`lua/valkey_globals.c`); it runs after setup, so a global added
   during setup must be on its allow list or it is dropped.
 - Valkey's EVAL error handler, the reply conversion and error formatting are also shared C (`lua/valkey_reply.c`),
