@@ -98,6 +98,14 @@ JNI-specific hazards handled in `JniValkeyLua`:
   limit of 200. The `Handler` therefore runs on that thread, not the caller's: thread-locals set by the caller are not
   visible to it. See [gaps.md](gaps.md) section 4.
 
+Where JNI differs from Valkey (found by diffing against `valkey-server` at `VALKEY_SHA`; Wasm matches Valkey on both):
+
+- `math.random`'s argument errors always name `'random'` (`luaLArgerror(L, n, "random", ...)` in `JniValkeyLua`).
+  Lua names the function from the call site: `pcall(math.random, 0)` gives `bad argument #1 to '?'` on Valkey and
+  `'random'` on JNI; `local r = math.random return r(0)` gives `'r'` on Valkey.
+- Returning a table nested past the Lua stack limit (`local t = {} for i = 1, 9000 do t = {t} end return t`) nests
+  one level deeper on JNI before `-ERR reached lua stack limit` (32014 reply bytes against Valkey's 32010).
+
 ## Where the backends differ
 
 Found by diffing probe scripts between the two backends; [gaps.md](gaps.md) has every case, the
@@ -110,8 +118,9 @@ hosts" in `ValkeyLuaTest` pin Valkey's values on both backends. What remains:
 | Memory cap | Chicory allows just under 2 GiB, less the 8 MiB C stack. Past it a script gets the Lua error `not enough memory`, which `pcall` can catch; the instance survives. Wasm memory never shrinks, so after an eval leaves it above `maxRetainedBytes` (default 128 MiB) the instance is rebuilt to release it; scripts can't tell. If building the reply runs out instead (e.g. returning `{s, s}` for a 512 MiB `s`), `eval` throws `IllegalStateException` and poisons the instance. Valkey has no Lua-specific limit. |
 | Memory accounting and GC timing | 32-bit pointers make objects smaller, so `collectgarbage('count')` figures, collector timing and weak-table clearing differ. |
 | `tostring` address width | 32-bit addresses (`table: 0x1e3f0`). Cosmetic. |
-| JVM thread stack bounds deep recursion | Valkey's own nesting limits need 512 KiB (every default meets it). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern backtracking, converting a nested return value) is bounded by the JVM stack: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the instance where Valkey returns a table, and returning a table nested about 3650 deep (4280 at 2 MiB) throws `ChicoryException` and poisons it where Valkey replies (or, from about 8000, sends `reached lua stack limit`). |
+| JVM thread stack bounds deep recursion | Valkey's own nesting limits need 512 KiB (every default meets it). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern backtracking, converting a nested return value) is bounded by the JVM stack: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the instance where Valkey returns a table, and returning a table nested about 3650 deep (4280 at 2 MiB) throws `ChicoryException` and poisons it where Valkey replies (or, from about 8000, sends `reached lua stack limit`). On an 8 MiB thread, 9000 deep still poisons it. |
 | String collation | Lua compares strings with `strcoll`. `lua.wasm` always uses the C locale (byte order), as do Valkey's official Docker images. A server whose `locale-collate` or environment names a language locale such as `en_US.UTF-8` orders strings differently (`'a' < 'B'`, `table.sort`). JNI follows the JVM process's locale through the host's C library, so it matches Wasm under `C` but not glibc under a language locale. |
+| NaN sign | `tostring(-(0/0))` is `-nan`, as on Linux Valkey (glibc); Valkey and JNI on macOS print `nan`. |
 | `string.dump` output | Headers record a 4-byte `size_t`, so dumps differ in bytes and length. |
 | `pairs` order over table- or function-keyed tables | Those keys hash by address, so iteration order differs. |
 
@@ -132,7 +141,8 @@ Ported from Valkey's `script_lua.c` (to C in `lua/valkey_lua.c` for Wasm, to Jav
 - Argument validation for every delegated function runs first; the handler only sees requests that passed it.
   `call`/`pcall` arguments follow `luaArgsToServerArgv` (integer numbers print as integers, others via `fpconv_dtoa`).
 - Global patches: `pcall` is Valkey's `luaRedisPcall` wrapper (`{err=}` tables become strings); `math.random` and
-  `math.randomseed` use Valkey's PRNG, so sequences match Valkey for the same seed.
+  `math.randomseed` use Valkey's PRNG, so sequences match Valkey for the same seed. Its state lives as long as the
+  instance, as on Valkey, so a sequence (and a `math.randomseed`) carries over to later evals.
 - Globals protection (`lua/valkey_globals.c`, from Valkey's `script_lua.c`/`engine_lua.c`): globals are cut to
   Valkey's allow list (so no `print`, `dofile`, `loadfile`, `newproxy`, `setfenv`, `getfenv` or `debug`), then the
   globals table, every table reachable from it and the basic types' metatables become read-only. Setting a global
@@ -326,9 +336,36 @@ exception, never a silently wrong value. An error reply is never "wrong type": i
 - Command error rewrites match on the message prefix only (Valkey also checks `errno`), so an unrelated error starting with
   one of the four prefixes is rewritten too.
 - `setresp(3)` is rejected by the default handler (`ERR RESP3 is not supported`); Valkey accepts it.
-- RESP2 only between Lua and the Handler.
+- RESP2 only between Lua and the Handler. Even with a handler that accepts `setresp(3)`, every RESP3 reply type
+  (`%`, `~`, `,`, `_`, `#`, `(`, `=`) raises `ERR unexpected reply from handler for server.call`.
+
+Found by diffing 278 probe scripts against `valkey-server` built at `VALKEY_SHA`, Valkey 8.1.10 and 9.0.6, and Redis
+7.2.16 and 8.10.2 ([gaps.md](gaps.md) section 8); both backends, unless noted:
+
+- **Error text follows unreleased Valkey.** `VALKEY_SHA` is Valkey's `unstable` branch (version `255.255.255`), where
+  Lua is a module and an uncaught error ends `script: on @user_script:1.`. Released Valkey (8.1, 9.0) and Redis send
+  `script: <sha1 of the script>, on @user_script:1.`, so every uncaught-error reply differs from theirs by that SHA.
+  Valkey 8.1 also says `This Redis command is not allowed from script` where `VALKEY_SHA` and 9.0 say `Valkey`.
+- **No shebang.** Valkey strips a `#!lua` first line and enforces its flags (`flags=no-writes` makes a write fail with
+  `Write commands are not allowed from read-only scripts.`; unknown flags and engines are rejected). Here the line
+  is Lua source, so any script starting with `#!` fails with `Error compiling script (new function):
+  user_script:1: unexpected symbol near '#'`.
+- **No script timeout.** Valkey checks every 100,000 instructions: after the busy threshold other clients get `-BUSY`,
+  and `SCRIPT KILL` ends the script with `-ERR Script killed by user with SCRIPT KILL.` (`pcall` can't catch it).
+  Here `while true do end` never returns. On Wasm, `Thread.interrupt()` on the eval thread stops it, but
+  `ChicoryInterruptedException` escapes `eval` and poisons the instance. On JNI the script keeps running on its pool
+  thread and an interrupted caller keeps waiting (still running 5 s after `interrupt()`); only ending the process
+  stops it.
+- **Script-context rules are the Handler's job.** Valkey runs script commands in script mode; a handler that forwards
+  them to a server as an ordinary client does not. Probed with such a pass-through: `MULTI` returns `+OK` and every
+  later command on that connection is queued, `EVAL` and `SUBSCRIBE` run, `CLIENT REPLY OFF` leaves the connection
+  waiting forever, `ACL WHOAMI` returns `default` (Valkey rejects all of these with `This Valkey command is not allowed
+  from script`), and `SELECT` inside a script changes the database the next script sees (Valkey keeps it local to the
+  script). The handler must also enforce `no-writes` for read-only scripts and check that `acl_check_cmd`'s command
+  exists (the default handler answers `:1` where Valkey raises `Invalid command passed to
+  server.acl_check_cmd()`).
 
 ## Not covered
 
-Script timeouts and SCRIPT KILL, RESP3 reply parsing and RESP3 output to the client, FUNCTION/FCALL,
-EVAL's error stats (`ignore_error_stats_update`), `lua-enable-insecure-api`, thread safety.
+Script timeouts and SCRIPT KILL (see above), shebang flags, RESP3 reply parsing and RESP3 output to the client,
+FUNCTION/FCALL, EVAL's error stats (`ignore_error_stats_update`), `lua-enable-insecure-api`, thread safety.

@@ -12,8 +12,10 @@ x86_64 (emulated on Apple silicon).
 
 ## Open gaps
 
-Ranked by how likely a script is to see the difference and what it costs when it does. None blocks ordinary
-scripts; the first two decide whether an instance stays usable on pathological input, not what a script computes.
+The first eight rows are ranked by how likely a script is to see the difference and what it costs when it does. None
+of them blocks ordinary scripts; the first two decide whether an instance stays usable on pathological input, not
+what a script computes. The rows after them were found by diffing against real servers (section 8) and are not ranked
+against the first eight; the shebang and timeout rows do block the scripts they affect.
 
 | Gap | What a script sees | Backend | Verdict | § |
 |---|---|---|---|---|
@@ -25,6 +27,14 @@ scripts; the first two decide whether an instance stays usable on pathological i
 | `pairs` order over table- or function-keyed tables | Those keys hash by address, so the order differs. | Wasm | OK; address-dependent on Valkey too. String- and number-keyed order is unaffected. | 2 |
 | `string.dump` output | Different bytes and length (98, not 106, for `function() return 'abc' end`). | Wasm | OK. | 2 |
 | `tostring` address width | `table: 0x1e3f0`, not a 64-bit address. Cosmetic. | Wasm | OK; addresses differ between servers anyway. | 2 |
+| No shebang | A script starting with `#!lua` (with or without `flags=`) fails to compile, so it does not run at all, and `no-writes` is never enforced. | Both | Blocker for any script with a shebang line. | 8 |
+| No script timeout | `while true do end` never returns: no `-BUSY`, no `SCRIPT KILL`. Interrupting the eval thread poisons a Wasm instance; JNI cannot be stopped short of ending the process. | Both | Blocker if scripts can be untrusted or buggy. | 8 |
+| Error text without the script SHA | Uncaught errors end `script: on @user_script:1.`, as at `VALKEY_SHA`; released Valkey and Redis send `script: <sha1>, on @user_script:1.` | Both | Decide which Valkey is the target; only clients parsing error text see it. | 8 |
+| RESP3 | Every RESP3 reply type from the `Handler` raises `ERR unexpected reply from handler for server.call`, even after `setresp(3)` is accepted. | Both | Blocker only for scripts that call `setresp(3)`. | 8 |
+| Script-context rules | Commands not allowed from scripts, script-local `SELECT`, `no-writes` and `acl_check_cmd`'s command check are left to the `Handler`; a pass-through to a server runs `MULTI`, `EVAL`, `SUBSCRIBE` and `CLIENT REPLY OFF` for real. | Both | The embedder's job; README "Divergences from Valkey". | 8 |
+| `math.random` argument-error name | Always `bad argument #1 to 'random'`; Lua names the call site (`'?'` under `pcall`, `'r'` for `local r = math.random`). | JNI | OK; error text only. | 8 |
+| Reply nesting at the Lua stack limit | One level deeper than Valkey before `reached lua stack limit` (32014 reply bytes against 32010 at 9000 levels). | JNI | OK. | 8 |
+| NaN sign | `tostring(-(0/0))` is `-nan` on Wasm and Linux Valkey (glibc), `nan` on macOS Valkey and JNI. | Wasm | OK; matches Linux hosts. | 6 |
 
 Addresses, `pairs` order over such keys and GC timing depend on the allocator, so two Valkey servers already differ
 on them; no backend can match them.
@@ -187,6 +197,9 @@ level; Valkey stops at about 8000 with `-ERR reached lua stack limit`. For
 | Wasm | 3638 / 3656: `ChicoryException`, instance poisoned | 4270 / 4288: same |
 | JNI | 6984 / 7000: JVM killed (SIGILL) | `reached lua stack limit` at 8000, as Valkey |
 
+On an 8 MiB thread (probed once, N = 9000), Wasm still throws `ChicoryException: call stack exhausted` and is
+poisoned, where Valkey at `VALKEY_SHA` and JNI reply with `reached lua stack limit` in place of the innermost levels.
+
 Tests: `nestingErrorsAtMinimumThreadStack` (both, 512 KiB caller thread), `deepReplyNestingPoisons` (Wasm, 1 MiB
 thread).
 
@@ -276,6 +289,9 @@ mostly the C stack), measured with `RebuildBench` (JMH, Apple M2 Pro, JDK 25). T
   `locale-collate` or environment names a language locale such as `en_US.UTF-8`; matching that would need glibc's
   collation tables in `lua.wasm`, and Java's `Collator` orders differently. JNI is not the reference here: it follows
   the process locale through the host's C library, and macOS's `en_US.UTF-8` order is not glibc's. Not tested.
+- **NaN sign** (probed). `tostring` formats numbers with `%.14g`, so a NaN's sign comes from the C library:
+  `tostring(-(0/0))` is `-nan` on Wasm (wasi-libc) and on Valkey 8.1.10 and 9.0.6 in their Linux images (glibc), and
+  `nan` on Valkey and JNI on macOS. Wasm matches Linux hosts; JNI follows its host.
 - **libm** (not probed). `math.sin`, `math.exp` and so on come from wasi-libc on Wasm, the host on JNI (Apple's on
   macOS) and glibc on Valkey on Linux; a last digit could differ under `string.format('%.17g', x)`.
 
@@ -331,3 +347,95 @@ isolates crashes, at an IPC round trip per `server.call` and a process to ship a
 already close and the remaining work is packaging. If memory safety without native code is the goal, only a Java port
 delivers it: time-box a spike (Lua core plus `lstrlib`, gated on Lua 5.1's suite, `ValkeyLuaTest`, differential
 fuzzing against JNI, and JMH) to measure the long tail first. Leave FFM until the minimum Java version is 22 or later.
+
+## 8. Probed against real servers
+
+The sections above compare the backends with each other, taking JNI as Valkey. Here 278 probe scripts were run on
+both backends and on real servers, and the RESP replies compared byte for byte. The servers were `valkey-server`
+built at `VALKEY_SHA` (macOS arm64), the official Valkey 8.1.10 and 9.0.6 and Redis 7.2.16 images (Linux arm64, C
+locale), and Redis 8.10.2 (macOS). The backends' `server.call` was forwarded byte for byte to a second `valkey-server`
+at `VALKEY_SHA`, and evals ran on 8 MiB threads. The probes covered:
+
+- return values and error replies;
+- `server.call`/`pcall` replies and errors, and argument formatting;
+- the globals allow list and read-only tables;
+- every `server.*` function;
+- `cjson`, `cmsgpack`, `struct`, `bit`, `string`, `math` and `table`;
+- nesting limits, KEYS/ARGV, and state carried across evals.
+
+The results were the same on the merged code after the x86-64 conversion and pooled-thread changes.
+
+Replies that differ from `valkey-server` at `VALKEY_SHA`, out of 278: Wasm 30, JNI 22. Against Valkey 9.0.6, 92 (Wasm)
+and 98 (JNI) out of 272 differ, 68 of them only by the script SHA in the error text.
+
+**Both backends.**
+
+- **No shebang.** Valkey strips a `#!lua` first line and enforces its flags. Here the line is Lua source, so every
+  shebang script fails with `Error compiling script (new function): user_script:1: unexpected symbol near '#'`:
+  - `#!lua` alone: Valkey runs the script (`:1`);
+  - `flags=no-writes` with a write: `Write commands are not allowed from read-only scripts.`;
+  - `flags=bogus`: `Unexpected flag in script shebang: bogus`;
+  - `#!python`: `Could not find scripting engine 'python'`.
+- **No script timeout.** Valkey's count hook runs every 100,000 instructions. Probed on Valkey 9.0.6 with `while true
+  do end`:
+  - after 6 s, `PING` from another client gets `-BUSY Valkey is busy running a script. You can only call SCRIPT KILL
+    or SHUTDOWN NOSAVE.`;
+  - `SCRIPT KILL` ends the script with `-ERR Script killed by user with SCRIPT KILL.`, also when the loop runs inside
+    `pcall`.
+
+  Here, after 10 s both backends are still running. `Thread.interrupt()` stops Wasm with `ChicoryInterruptedException`,
+  which escapes `eval` and poisons the instance. JNI is still running 5 s after the interrupt.
+- **Error text.** At `VALKEY_SHA`, Lua is a module, and `script_lua.c` formats an uncaught error as
+  `"%s script: on %s:%s."`. Valkey 8.1/9.0 and Redis include the script's SHA1:
+  `script: 694a5fe1…, on @user_script:1.`. Valkey 8.1 also says `This Redis command is not allowed from script`, where
+  `VALKEY_SHA` and 9.0 say `Valkey`.
+- **RESP3.** A handler that accepts `setresp(3)` and then answers with `%`, `~`, `,`, `_`, `#`, `(` or `=` gets
+  `ERR unexpected reply from handler for server.call` for each. On Valkey, `setresp(3)` followed by `HGETALL` returns
+  the map, and `return false` replies `:0`.
+- **Script-context rules.** With a pass-through handler:
+  - `MULTI` returned `+OK` and queued every later command on the connection;
+  - `EVAL` returned `:1`;
+  - `SUBSCRIBE` subscribed;
+  - `CLIENT REPLY OFF` left the connection waiting;
+  - `ACL WHOAMI` returned `default`;
+  - `SELECT 1` in one script changed the database the next script read.
+
+  Valkey rejects the first five with `This Valkey command is not allowed from script` and keeps `SELECT` local to the
+  script. `acl_check_cmd('nosuchcmd')` is `:1` from the default handler, and `-ERR Invalid command passed to
+  server.acl_check_cmd()` on Valkey.
+
+**JNI.**
+
+- **`math.random` argument errors.** `JniValkeyLua` passes `"random"` to its `luaL_argerror` port. Valkey's
+  `luaL_argerror` takes the name from the call site:
+  - `pcall(math.random, 0)`: `bad argument #1 to '?' (interval is empty)` on Valkey and Wasm, `'random'` on JNI;
+  - `local r = math.random return r(0)`: `'r'` on Valkey.
+- **Reply nesting at the Lua stack limit.** For a table nested 9000 deep, JNI nests one level deeper than Valkey
+  before `-ERR reached lua stack limit` (32014 bytes against 32010).
+
+**Matched.** Everything else matched `valkey-server` at `VALKEY_SHA` on both backends:
+
+- every return-value conversion;
+- every error path and message, including `server.call`'s error rewrites;
+- 18 number-argument formats;
+- the globals allow list and its read-only protection;
+- the libraries and the 64-bit integer cases;
+- cjson, `string.gsub` and Lua recursion limits;
+- binary-safe KEYS/ARGV;
+- the PRNG, which carries over across evals on one instance as on Valkey (`math.randomseed(7)` in one eval, then
+  `math.random(1000000)` in the next, gives 682036 everywhere).
+
+String collation and `pairs` order differ only where sections 2 and 6 say. `collectgarbage('count')` deltas differ
+between Valkey servers themselves, because their Lua state persists across evals.
+
+**Redis is a different target.** Besides the SHA, Redis 7.2/8.10 have:
+
+- no `server` global and no `__server__err__handler`, and Redis 7.2 has no `os`;
+- `Redis` in the error rewrites (`Unknown Redis command called from script`) and `redis.log()` in argument errors,
+  and Redis 7.2 says `Invalid debug level`;
+- `Lua redis lib command arguments must be strings or integers`;
+- `cjson.decode_array_with_array_mt` in Redis 8.10;
+- a different `pairs` order over string keys.
+
+Not probed: x86-64 servers, and `nestedErrorFailsWholeCall` (the probe used `EVAL` inside a script, which every
+server rejects).
