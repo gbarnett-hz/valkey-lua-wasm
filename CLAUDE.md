@@ -46,11 +46,11 @@ cd java && mvn test -Dtest='*ValkeyLuaTest#testName'       # one shared test, bo
 
 - The JNI backend (64-bit, unpatched Valkey sources) is the reference for Valkey's behaviour. The Wasm backend must
   match it; anything it can't match is a deviation and must be documented with what a script observes, in
-  `wasm-difference.md` and the README's "Where the backends differ".
+  `gaps.md` and the README's "Where the backends differ".
 - `lua.wasm` is wasm32. `lua/patches/` and two `CFLAGS` switches (`-DLUA_USELONGLONG`, `-DSTRUCT_INT='long long'`) make
   every value derived from a Lua integer 64-bit, as on Valkey; it links an 8 MiB C stack. Patches are applied with
   `patch -F 0`, so one that no longer applies exactly fails the build. Patching only some sites makes string/struct
-  positions worse than unpatched (see `wasm-difference.md` section 6).
+  positions worse than unpatched (see `gaps.md` section 1).
 - `ValkeyLuaTest` is the shared suite holding Valkey's expected values; `WasmValkeyLuaTest` and `JniValkeyLuaTest`
   only construct their backend, plus backend-only tests. A test that can't pass on Wasm is a documented deviation,
   not a shared test. Take new expected values from the JNI backend.
@@ -62,5 +62,5 @@ cd java && mvn test -Dtest='*ValkeyLuaTest#testName'       # one shared test, bo
 
 - `README.md`: the `Handler` interface, the reply/error contract (RESP2 replies, raise vs. return, Valkey's command
   error rewrites matched on prefix only), and backend notes. Changes to behaviour usually need a README update.
-- `wasm-difference.md`: every Wasm/Valkey difference found, its fix and test, and what remains.
+- `gaps.md`: every Wasm/Valkey difference found, its fix and test, what remains, and the alternatives to both backends.
 - `docs/superpowers/specs/` and `docs/superpowers/plans/`: design docs and implementation plans.

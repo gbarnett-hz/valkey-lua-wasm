@@ -23,7 +23,7 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
     // Wasm-only: JNI runs Lua's C code on the thread's native stack and needs more (README, JNI backend).
     @Test
     void nestingErrorsAtMinimumThreadStack() throws Exception {
-        // The documented minimum JVM thread stack for Wasm evals is 512 KiB (wasm-difference.md section 7).
+        // The documented minimum JVM thread stack for Wasm evals is 512 KiB (gaps.md section 4).
         var results = new ArrayList<ValkeyLua.Result>();
         var failure = new AtomicReference<Throwable>();
         var t = new Thread(null, () -> {
@@ -44,7 +44,7 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
 
     @Test
     void memoryCapIsAnOrdinaryLuaError() {
-        // Chicory caps linear memory at 32767 pages; JNI succeeds here, so this is Wasm-only (wasm-difference.md section 8).
+        // Chicory caps linear memory at 32767 pages; JNI succeeds here, so this is Wasm-only (gaps.md section 5).
         // Doubling by concatenation (bulk copies) reaches the cap in about a second; string.rep builds byte by byte.
         assertEquals(result(false, error("ERR Error running script, not enough memory")),
             lua.eval("local s = 'x' for i = 1, 31 do s = s .. s end return #s"));
@@ -87,7 +87,7 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
 
     @Test
     void numberCastSaturates() {
-        // (long long) of an out-of-range double: wasm's i64.trunc_sat_f64_s saturates, NaN gives 0 (wasm-difference.md).
+        // (long long) of an out-of-range double: wasm's i64.trunc_sat_f64_s saturates, NaN gives 0 (gaps.md).
         assertEquals(java.util.List.of(integer(Long.MAX_VALUE), integer(Long.MIN_VALUE), integer(Long.MAX_VALUE),
             integer(Long.MIN_VALUE), integer(0)), int64Edges());
     }
