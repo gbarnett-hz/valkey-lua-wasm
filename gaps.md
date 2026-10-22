@@ -16,7 +16,7 @@ fixed sections show the build before the fix.
 | Memory cap | Lua data is capped just under 2 GiB: `not enough memory`, catchable. If building the reply runs out, `eval` throws and poisons the instance. Valkey has no Lua-specific limit. | Wasm | 5 |
 | Memory kept after growth | Wasm memory never shrinks: an instance that grew keeps that `byte[]` (up to ~2 GiB of JVM heap) for its life. | Wasm | 5 |
 | Unlimited recursion | Recursion Valkey does not limit (`cmsgpack.unpack` nesting, pattern backtracking, nested return values) is bounded by the JVM thread stack: Wasm poisons the instance, JNI kills the JVM. | both | 4 |
-| String collation | `'a' < 'B'` is `true` under `en_US.UTF-8` on Valkey and JNI, `false` on Wasm (C locale only), so `table.sort` of mixed-case strings differs. | Wasm | 6 |
+| String collation under a language locale | Wasm always collates in byte order, as Valkey's official images do. A server whose `locale-collate` or environment names a locale such as `en_US.UTF-8` orders strings differently (`'a' < 'B'`, `table.sort`). | Wasm | 6 |
 | Out-of-range number returned | `return 2^63`, `1/0`, `-1/0`, `0/0` saturate on Wasm; Valkey matches on arm64 but gives `INT64_MIN` on x86-64. | Wasm on x86-64 | 6 |
 | Memory accounting and GC timing | `collectgarbage('count')` is smaller, so the collector runs and weak tables clear at different points. | Wasm | 2 |
 | `tostring` address width | `table: 0x1e3f0`, not a 64-bit address. Cosmetic. | Wasm | 2 |
@@ -24,8 +24,8 @@ fixed sections show the build before the fix.
 | `pairs` order over table- or function-keyed tables | Those keys hash by address, so the order differs. | Wasm | 2 |
 
 Addresses, `pairs` order over such keys and GC timing depend on the allocator, so two Valkey servers already differ
-on them; no backend can match them. The ones a script can actually rely on and hit are the memory cap, recursion depth
-and collation.
+on them; no backend can match them. The ones a script can actually rely on and hit are the memory cap and recursion depth;
+collation only on a server configured with a language locale.
 
 ## Fixed
 
@@ -214,19 +214,23 @@ only cap. Growing copies the `byte[]`, so the JVM needs room for two copies near
   `INT64_MIN`. So on x86-64, Valkey and JNI give `:-9223372036854775808` for `2^63`, `1/0`, `-1/0` and `0/0`, where
   Wasm gives `:9223372036854775807`, `:9223372036854775807`, `:-9223372036854775808` and `:0`. Tests:
   `numberCastSaturates` (Wasm), `numberCastFollowsHardware` (JNI).
-- **String collation** (probed). `<` on strings and `table.sort` call `strcoll`. Valkey sets `LC_COLLATE` from
-  `locale-collate` (default `""`, the environment) and JNI follows the process locale; wasi-libc has only the C locale.
-  Matching would need collation tables in `lua.wasm`. Not tested.
+- **String collation** (probed). `<` on strings and `table.sort` call `strcoll` (`lvm.c:211`). Valkey sets
+  `LC_COLLATE` from `locale-collate` (default `""`, the environment; `server.c`, `config.c`). wasi-libc has only the C
+  locale, so Wasm collates in byte order. So does Valkey in its official images: they set no `LANG`, so Debian-slim
+  runs in the C locale, and musl's `strcoll` (Alpine) is `strcmp`. Wasm differs only from a server whose
+  `locale-collate` or environment names a language locale such as `en_US.UTF-8`; matching that would need glibc's
+  collation tables in `lua.wasm`, and Java's `Collator` orders differently. JNI is not the reference here: it follows
+  the process locale through the host's C library, and macOS's `en_US.UTF-8` order is not glibc's. Not tested.
 - **libm** (not probed). `math.sin`, `math.exp` and so on come from wasi-libc on Wasm, the host on JNI (Apple's on
   macOS) and glibc on Valkey on Linux; a last digit could differ under `string.format('%.17g', x)`.
 
 ## 7. Alternatives to the two backends
 
-Judged against the gaps a script can hit: the memory cap, recursion depth and collation.
+Judged against the gaps a script can hit: the memory cap and recursion depth (collation only under a language locale).
 
 | Option | Fidelity | Fixes | Main risk |
 |---|---|---|---|
-| Wasm on Chicory (current) | Valkey's C, patched | — | memory cap; recursion depth; collation |
+| Wasm on Chicory (current) | Valkey's C, patched | — | memory cap; recursion depth |
 | JNI through luajava (current) | the reference | — | native code in the JVM: a Lua crash or memory-safety bug takes down or corrupts it; a native build per platform |
 | FFM instead of JNI | as JNI | none of the Wasm gaps | needs Java 22; the build targets 17 |
 | wasm64 on GraalWasm | Valkey's C, fewer patches | pointer width, perhaps the cap | experimental; no wasm64 libc; heavy dependency |
@@ -268,7 +272,7 @@ isolates crashes, at an IPC round trip per `server.call` and a process to ship a
 
 **GraalVM's LLVM runtime (Sulong)** would run the C on the JVM; its maintenance status was not established.
 
-**Conclusion.** If the memory cap, recursion depth and collation do not matter for the scripts in question, Wasm is
+**Conclusion.** If the memory cap and recursion depth do not matter for the scripts in question, Wasm is
 already close and the remaining work is packaging. If memory safety without native code is the goal, only a Java port
 delivers it: time-box a spike (Lua core plus `lstrlib`, gated on Lua 5.1's suite, `ValkeyLuaTest`, differential
 fuzzing against JNI, and JMH) to measure the long tail first. Leave FFM until the minimum Java version is 22 or later.
