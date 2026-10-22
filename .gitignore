@@ -5,3 +5,4 @@ native/build/
 java/target/
 .claude/
 .agents/
+bench/target/
