@@ -86,6 +86,7 @@ public final class WasmValkeyLua extends ValkeyLua {
                 .withStart(false)
                 .build();
         instance.export("_initialize").apply();
+        if (X86) instance.export("set_x86_cast").apply(1);
         setServerInfo(info);
         if (old != null) instance.export("set_rand_state").apply(old.export("rand_state").apply()[0]);
     }

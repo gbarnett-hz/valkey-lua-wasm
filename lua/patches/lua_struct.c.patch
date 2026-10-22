@@ -11,6 +11,18 @@
      case 'f':  return sizeof(float);
      case 'd':  return sizeof(double);
      case 'x': return 1;
+@@ -172,9 +172,9 @@
+   Uinttype value;
+   char buff[MAXINTSIZE];
+   if (n < 0)
+-    value = (Uinttype)(Inttype)n;
++    value = (Uinttype)valkey_d2ll(n);  /* wasm: the host CPU's casts */
+   else
+-    value = (Uinttype)n;
++    value = valkey_d2ull(n);
+   if (endian == LITTLE) {
+     int i;
+     for (i = 0; i < size; i++) {
 @@ -295,7 +295,7 @@
    const char *fmt = luaL_checkstring(L, 1);
    size_t ld;
@@ -20,3 +32,21 @@
    luaL_argcheck(L, pos > 0, 3, "offset must be 1 or greater");
    pos--; /* Lua indexes are 1-based, but here we want 0-based for C
            * pointer math. */
+@@ -303,7 +303,7 @@
+   defaultoptions(&h);
+   while (*fmt) {
+     int opt = *fmt++;
+-    size_t size = optsize(L, opt, &fmt);
++    unsigned long long size = optsize(L, opt, &fmt);  /* wasm32: size_t on Valkey's 64-bit hosts */
+     pos += gettoalign(pos, &h, opt, size);
+     luaL_argcheck(L, size <= ld && pos <= ld - size,
+                    2, "data string too short");
+@@ -338,7 +338,7 @@
+         if (size == 0) {
+           if (n == 0 || !lua_isnumber(L, -1))
+             luaL_error(L, "format 'c0' needs a previous size");
+-          size = lua_tonumber(L, -1);
++          size = valkey_d2ull(lua_tonumber(L, -1));
+           lua_pop(L, 1); n--;
+           luaL_argcheck(L, size <= ld && pos <= ld - size,
+                            2, "data string too short");

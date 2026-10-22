@@ -337,7 +337,7 @@ public final class JniValkeyLua extends ValkeyLua {
             luaPushError(L, "server.setresp() requires one argument.");
             return -1;
         }
-        int resp = (int) C.lua_tonumber(L, -argc);
+        int resp = d2i(C.lua_tonumber(L, -argc));
         if (resp != 2 && resp != 3) {
             luaPushError(L, "RESP version must be 2 or 3.");
             return -1;
@@ -353,7 +353,7 @@ public final class JniValkeyLua extends ValkeyLua {
             luaPushError(L, "server.set_repl() requires one argument.");
             return -1;
         }
-        int flags = (int) C.lua_tonumber(L, -1);
+        int flags = d2i(C.lua_tonumber(L, -1));
         if ((flags & ~3) != 0) {
             luaPushError(L, "Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.");
             return -1;
@@ -371,7 +371,7 @@ public final class JniValkeyLua extends ValkeyLua {
             luaPushError(L, "First argument must be a number (log level).");
             return -1;
         }
-        int level = (int) C.lua_tonumber(L, -argc);
+        int level = d2i(C.lua_tonumber(L, -argc));
         if (level < 0 || level > 3) {
             luaPushError(L, "Invalid log level.");
             return -1;

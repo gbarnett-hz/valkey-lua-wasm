@@ -1,7 +1,11 @@
 --- a/deps/lua/src/lua_cmsgpack.c
 +++ b/deps/lua/src/lua_cmsgpack.c
-@@ -24,12 +24,8 @@
- #define IS_INT64_EQUIVALENT(x) IS_INT_TYPE_EQUIVALENT(x, int64_t)
+@@ -21,15 +21,11 @@
+ /* Check if float or double can be an integer without loss of precision */
+ #define IS_INT_TYPE_EQUIVALENT(x, T) (!isinf(x) && (T)(x) == (x))
+ 
+-#define IS_INT64_EQUIVALENT(x) IS_INT_TYPE_EQUIVALENT(x, int64_t)
++#define IS_INT64_EQUIVALENT(x) (!isinf(x) && valkey_d2ll(x) == (x))  /* wasm: the host CPU's cast */
  #define IS_INT_EQUIVALENT(x) IS_INT_TYPE_EQUIVALENT(x, int)
  
 -/* If size of pointer is equal to a 4 byte integer, we're on 32 bits. */

@@ -606,7 +606,7 @@ static int luaSetResp(lua_State *lua) {
         luaPushError(lua, "server.setresp() requires one argument.");
         return lua_error(lua);
     }
-    int resp = lua_tonumber(lua, -argc);
+    int resp = valkey_d2i(lua_tonumber(lua, -argc));
     if (resp != 2 && resp != 3) {
         luaPushError(lua, "RESP version must be 2 or 3.");
         return lua_error(lua);
@@ -622,7 +622,7 @@ static int luaRedisSetReplCommand(lua_State *lua) {
         luaPushError(lua, "server.set_repl() requires one argument.");
         return lua_error(lua);
     }
-    flags = lua_tonumber(lua, -1);
+    flags = valkey_d2i(lua_tonumber(lua, -1));
     if ((flags & ~3) != 0) {
         luaPushError(lua, "Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.");
         return lua_error(lua);
@@ -642,7 +642,7 @@ static int luaLogCommand(lua_State *lua) {
         luaPushError(lua, "First argument must be a number (log level).");
         return lua_error(lua);
     }
-    level = lua_tonumber(lua, -argc);
+    level = valkey_d2i(lua_tonumber(lua, -argc));
     if (level < 0 || level > 3) {
         luaPushError(lua, "Invalid log level.");
         return lua_error(lua);

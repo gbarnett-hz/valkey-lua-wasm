@@ -1,0 +1,11 @@
+--- a/deps/lua/src/lua_cjson.c
++++ b/deps/lua/src/lua_cjson.c
+@@ -506,7 +506,7 @@
+             /* Integer >= 1 ? */
+             if (floor(k) == k && k >= 1) {
+                 if (k > max)
+-                    max = k;
++                    max = valkey_d2i(k);  /* wasm: the host CPU's cast */
+                 items++;
+                 lua_pop(l, 1);
+                 continue;

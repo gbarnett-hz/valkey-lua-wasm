@@ -54,6 +54,9 @@ docker build --platform linux/amd64 -t valkey-lua . && docker run --rm --platfor
   every value derived from a Lua integer 64-bit, as on Valkey; it links an 8 MiB C stack. Patches are applied with
   `patch -F 0`, so one that no longer applies exactly fails the build. Patching only some sites makes string/struct
   positions worse than unpatched (see `gaps.md` section 1).
+- C's double-to-integer conversion is undefined out of range, so Valkey's result depends on the CPU. In `lua.wasm` every
+  conversion a script can observe goes through `lua/valkey_cvt.c` (x86-64 mode set by `WasmValkeyLua` on x86-64);
+  the JNI Java port uses `ValkeyLua.d2i`. A new conversion site needs the same.
 - `ValkeyLuaTest` is the shared suite holding Valkey's expected values; `WasmValkeyLuaTest` and `JniValkeyLuaTest`
   only construct their backend, plus backend-only tests. A test that can't pass on Wasm is a documented deviation,
   not a shared test. Take new expected values from the JNI backend.

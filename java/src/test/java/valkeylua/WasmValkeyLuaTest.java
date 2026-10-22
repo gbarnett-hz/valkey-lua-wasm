@@ -76,11 +76,4 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
             () -> lua.eval("local s = 'x' for i = 1, 28 do s = s .. s end collectgarbage() return {s, s}")));
         assertEquals("reply conversion failed", e.getMessage());
     }
-
-    @Test
-    void numberCastSaturates() {
-        // (long long) of an out-of-range double: wasm's i64.trunc_sat_f64_s saturates, NaN gives 0 (gaps.md).
-        assertEquals(java.util.List.of(integer(Long.MAX_VALUE), integer(Long.MIN_VALUE), integer(Long.MAX_VALUE),
-            integer(Long.MIN_VALUE), integer(0)), int64Edges());
-    }
 }
