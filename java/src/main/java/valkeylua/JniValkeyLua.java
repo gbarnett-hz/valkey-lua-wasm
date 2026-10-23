@@ -11,6 +11,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
@@ -530,6 +531,12 @@ public final class JniValkeyLua extends ValkeyLua {
         } finally {
             if (interrupted) Thread.currentThread().interrupt();
         }
+    }
+
+    /** Nothing can stop native Lua short of ending the process (README "No script timeout"). */
+    @Override
+    Result eval(String script, byte[] kv, Duration timeout) {
+        throw new UnsupportedOperationException("JniValkeyLua cannot stop a running script; use WasmValkeyLua");
     }
 
     private Result evalOnLuaThread(String script, byte[] kv) {

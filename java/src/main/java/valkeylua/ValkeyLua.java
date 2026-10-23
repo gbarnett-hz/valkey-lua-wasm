@@ -2,6 +2,7 @@ package valkeylua;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
@@ -61,6 +62,22 @@ public abstract sealed class ValkeyLua permits WasmValkeyLua, JniValkeyLua {
     }
 
     public Result eval(String script, List<byte[]> keys, List<byte[]> args) {
+        return eval(script, kv(keys, args));
+    }
+
+    /**
+     * Throws {@link ScriptTimeoutException} once timeout (wall time from the start of the eval, handler calls included)
+     * has passed. Wasm only: {@link JniValkeyLua} throws {@link UnsupportedOperationException}.
+     */
+    public Result eval(String script, Duration timeout) {
+        return eval(script, List.of(), List.of(), timeout);
+    }
+
+    public Result eval(String script, List<byte[]> keys, List<byte[]> args, Duration timeout) {
+        return eval(script, kv(keys, args), timeout);
+    }
+
+    private static byte[] kv(List<byte[]> keys, List<byte[]> args) {
         var kvOut = new ByteArrayOutputStream();
         kvOut.writeBytes("*2\r\n".getBytes(StandardCharsets.US_ASCII));
         for (var list : List.of(keys, args)) {
@@ -71,14 +88,18 @@ public abstract sealed class ValkeyLua permits WasmValkeyLua, JniValkeyLua {
                 kvOut.writeBytes("\r\n".getBytes(StandardCharsets.US_ASCII));
             }
         }
-        return eval(script, kvOut.toByteArray());
+        return kvOut.toByteArray();
+    }
+
+    void checkUsable() {
+        if (poisoned) {
+            throw new IllegalStateException("ValkeyLua instance is unusable after an escaped exception; create a new one");
+        }
     }
 
     /** Package-private seam so tests can pass a raw (possibly malformed) KEYS/ARGV buffer. */
     Result eval(String script, byte[] kv) {
-        if (poisoned) {
-            throw new IllegalStateException("ValkeyLua instance is unusable after an escaped exception; create a new one");
-        }
+        checkUsable();
         try {
             return evalUnchecked(script, kv);
         } catch (Throwable e) {
@@ -100,4 +121,6 @@ public abstract sealed class ValkeyLua permits WasmValkeyLua, JniValkeyLua {
 
     /** kv is the RESP2 reply *2 [keys array, args array]. */
     abstract Result evalUnchecked(String script, byte[] kv);
+
+    abstract Result eval(String script, byte[] kv, Duration timeout);
 }

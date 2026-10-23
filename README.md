@@ -10,7 +10,8 @@ API delegated to a `Handler`. Two backends behind one API (`ValkeyLua`) and one 
 | Isolation | Wasm sandbox; nothing native | native code in the JVM; a Lua panic would kill the JVM (guarded, see below) |
 | Integer width | 64-bit, as Valkey (patched; pointers and `size_t` stay 32-bit) | 64-bit, as Valkey |
 | Build | wasi-sdk | host C/C++ compiler, JNI headers |
-| Construct | `new WasmValkeyLua(Path wasm, handler[, info[, maxRetainedBytes]])` | `new JniValkeyLua(handler[, info])` |
+| Construct | `new WasmValkeyLua(Path wasm, handler[, info[, maxRetainedBytes[, watchdog]]])` | `new JniValkeyLua(handler[, info])` |
+| `eval(..., Duration timeout)` | throws `ScriptTimeoutException` past the timeout | throws `UnsupportedOperationException` |
 
 Both give 64-bit Valkey's results; the few remaining differences are in [Where the backends differ](#where-the-backends-differ).
 
@@ -361,6 +362,22 @@ Found by diffing 278 probe scripts against `valkey-server` built at `VALKEY_SHA`
   `eval` waits uninterruptibly and never throws `ScriptInterruptedException`: the script keeps running on its pool
   thread and an interrupted caller keeps waiting (still running 5 s after `interrupt()`); only ending the process
   stops it.
+
+  On Wasm, `eval(script[, keys, args], Duration timeout)` does this for the embedder: past the timeout (wall time
+  from the start of `eval`, handler calls included) it throws `ScriptTimeoutException`, within about 20 ms of the
+  deadline plus Chicory's stop latency, also inside a long C call. The instance is reset (only `math.random`'s state
+  carries over, as with `reset()`) and usable at once. Handler side effects of the stopped script are not undone, and
+  the client's reply (Valkey's `-BUSY`, `SCRIPT KILL`) is the embedder's call. The library interrupts the thread
+  only while Lua runs inside that `eval`: a handler call that overruns the deadline runs to completion, and the
+  script stops as control returns to Lua. The library consumes its own interrupt, waiting for one it has committed
+  to send, so the interrupt flag after `eval` is as it would have been without the timeout. An interrupt from
+  anyone else behaves as on an untimed `eval` (`ScriptInterruptedException`, flag set, a flag already set on entry
+  stops even `return 1`); if the timeout also passed, `ScriptTimeoutException` wins and their interrupt stays on the
+  flag. One race remains: an interrupt from someone else that lands in the microseconds between the watchdog's
+  check of the flag and its own interrupt merges with the library's and is consumed with it. Deadline checks run on
+  the constructor's `ScheduledExecutorService`, or else on one daemon thread shared by all instances, started on
+  the first timed `eval`. JNI throws `UnsupportedOperationException`: nothing stops native Lua inside a C call such
+  as `string.find`, and a count hook can't run there either.
 - **Script-context rules are the Handler's job.** Valkey runs script commands in script mode; a handler that forwards
   them to a server as an ordinary client does not. Probed with such a pass-through: `MULTI` returns `+OK` and every
   later command on that connection is queued, `EVAL` and `SUBSCRIBE` run, `CLIENT REPLY OFF` leaves the connection
@@ -372,5 +389,5 @@ Found by diffing 278 probe scripts against `valkey-server` built at `VALKEY_SHA`
 
 ## Not covered
 
-Script timeouts and SCRIPT KILL (see above), shebang flags, RESP3 reply parsing and RESP3 output to the client,
+SCRIPT KILL and `-BUSY` (see above), script timeouts on JNI, shebang flags, RESP3 reply parsing and RESP3 output to the client,
 FUNCTION/FCALL, EVAL's error stats (`ignore_error_stats_update`), `lua-enable-insecure-api`, thread safety.
