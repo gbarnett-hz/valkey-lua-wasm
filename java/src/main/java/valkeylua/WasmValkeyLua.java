@@ -77,6 +77,16 @@ public final class WasmValkeyLua extends ValkeyLua {
         rebuild();
     }
 
+    /**
+     * Replaces the instance with a fresh one from the module compiled at construction (well under a millisecond, where
+     * constructing a new WasmValkeyLua compiles it again) and makes a poisoned instance usable again. As with the
+     * rebuild past maxRetainedBytes, only math.random's state carries over.
+     */
+    public void reset() {
+        rebuild();
+        clearPoisoned();
+    }
+
     /** Replaces the instance with a fresh one, dropping its linear memory. */
     void rebuild() {
         var old = instance;
