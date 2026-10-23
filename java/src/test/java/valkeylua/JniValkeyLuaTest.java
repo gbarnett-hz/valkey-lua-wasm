@@ -2,9 +2,11 @@ package valkeylua;
 
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
+import java.time.Duration;
 
 import org.junit.jupiter.api.Test;
 
@@ -21,6 +23,12 @@ class JniValkeyLuaTest extends ValkeyLuaTest {
         assertEquals(integer(1), ok("return string.find(string.rep('a', 20000), string.rep('a?', 20000))"));
         var r = lua.eval("local t = {} for i = 1, 10000 do t = {t} end return t");
         assertTrue(r.ok() && new String(r.reply(), ISO_8859_1).endsWith("*1\r\n-ERR reached lua stack limit\r\n"), r::toString);
+    }
+
+    @Test
+    void timeoutIsUnsupported() {
+        assertThrows(UnsupportedOperationException.class, () -> lua.eval("return 1", Duration.ofSeconds(1)));
+        assertEquals(integer(1), ok("return 1"));
     }
 
     @Test

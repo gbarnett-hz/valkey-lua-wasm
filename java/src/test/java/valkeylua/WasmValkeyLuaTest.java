@@ -2,6 +2,7 @@ package valkeylua;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
@@ -9,6 +10,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dylibso.chicory.runtime.ChicoryInterruptedException;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -158,5 +163,159 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
         var e = assertTimeoutPreemptively(java.time.Duration.ofSeconds(120), () -> assertThrows(IllegalStateException.class,
             () -> lua.eval("local s = 'x' for i = 1, 28 do s = s .. s end collectgarbage() return {s, s}")));
         assertEquals("reply conversion failed", e.getMessage());
+    }
+
+    @Test
+    void timeoutStopsInfiniteLoop() {
+        assertTimesOut("while true do end");
+    }
+
+    @Test
+    void timeoutStopsLongCCall() {
+        assertTimesOut("return string.find(string.rep('a', 26), string.rep('a?', 26) .. string.rep('a', 26))");
+    }
+
+    /** A 200 ms timeout stops the script within 100 ms of its deadline; flag clear, instance usable without reset(). */
+    private void assertTimesOut(String script) {
+        long start = System.nanoTime();
+        assertThrows(ScriptTimeoutException.class, () -> lua.eval(script, Duration.ofMillis(200)));
+        long ms = (System.nanoTime() - start) / 1_000_000;
+        assertTrue(ms >= 200 && ms < 300, "eval took " + ms + " ms");
+        assertFalse(Thread.interrupted());
+        assertEquals(result(true, integer(1)), lua.eval("return 1"));
+    }
+
+    @Test
+    void timeoutDuringHandlerWaitsForItThenStopsBeforeMoreLua() {
+        var calls = new AtomicInteger();
+        var flagAtStart = new AtomicBoolean();
+        var sleepInterrupted = new AtomicBoolean();
+        var slept = new AtomicLong();
+        var l = create(args -> {
+            calls.incrementAndGet();
+            flagAtStart.set(Thread.currentThread().isInterrupted());
+            long t0 = System.nanoTime();
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                sleepInterrupted.set(true);
+            }
+            slept.set((System.nanoTime() - t0) / 1_000_000);
+            return "+PONG\r\n".getBytes(UTF_8);
+        });
+        assertThrows(ScriptTimeoutException.class,
+            () -> l.eval("redis.call('ping') redis.call('ping') while true do end", Duration.ofMillis(100)));
+        assertEquals(1, calls.get());
+        assertFalse(flagAtStart.get());
+        assertFalse(sleepInterrupted.get());
+        assertTrue(slept.get() >= 300, "slept " + slept.get() + " ms");
+        assertFalse(Thread.interrupted());
+    }
+
+    @Test
+    void timeoutRaceNeverLeavesOrSendsAnInterrupt() throws Exception {
+        // The loop length tracks the deadline (shorter after a timeout, longer after a success), so evals keep finishing
+        // just before or just after it: the window where the watchdog races the end of Lua.
+        long n = 10_000;
+        int timedOut = 0;
+        for (int i = 0; i < 10_000; i++) {
+            try {
+                lua.eval("for i = 1, tonumber(ARGV[1]) do end", List.of(), List.of(Long.toString(n).getBytes(UTF_8)),
+                    Duration.ofMillis(1));
+                n += n / 20 + 1;
+            } catch (ScriptTimeoutException e) {
+                timedOut++;
+                n -= n / 20;
+            }
+            assertFalse(Thread.currentThread().isInterrupted(), "flag set after eval " + i);
+            Thread.sleep(1);
+        }
+        assertTrue(timedOut > 1000 && timedOut < 9000, timedOut + " of 10000 timed out");
+    }
+
+    @Test
+    void otherInterruptDuringTimedEvalIsScriptInterrupted() throws Exception {
+        var evalThread = Thread.currentThread();
+        var t = new Thread(() -> {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                return;
+            }
+            evalThread.interrupt();
+        });
+        t.start();
+        assertThrows(ScriptInterruptedException.class, () -> lua.eval("while true do end", Duration.ofSeconds(5)));
+        assertTrue(Thread.interrupted());
+        t.join();
+    }
+
+    @Test
+    void timeoutWinsOverOtherInterruptWhichStaysSet() {
+        // The handler interrupts its thread after the deadline passed: both stop the script, the timeout is reported.
+        var l = create(args -> {
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                throw new AssertionError(e);
+            }
+            Thread.currentThread().interrupt();
+            return "+OK\r\n".getBytes(UTF_8);
+        });
+        try {
+            assertThrows(ScriptTimeoutException.class,
+                () -> l.eval("redis.call('ping') while true do end", Duration.ofMillis(100)));
+            assertTrue(Thread.currentThread().isInterrupted());
+        } finally {
+            Thread.interrupted();
+        }
+        assertEquals(result(true, integer(1)), l.eval("return 1"));
+    }
+
+    @Test
+    void timedEvalThatFinishesLeavesFlagUnchanged() {
+        assertEquals(result(true, integer(1)), lua.eval("return 1", Duration.ofSeconds(1)));
+        assertFalse(Thread.currentThread().isInterrupted());
+    }
+
+    @Test
+    void timedEvalWithFlagSetOnEntryIsInterruptedAsUntimed() {
+        // Chicory stops even `return 1` when the flag is already set; the timeout must not change that or the flag.
+        var untimed = create(args -> "+OK\r\n".getBytes(UTF_8));
+        Thread.currentThread().interrupt();
+        try {
+            assertThrows(ScriptInterruptedException.class, () -> untimed.eval("return 1"));
+            assertTrue(Thread.currentThread().isInterrupted());
+            assertThrows(ScriptInterruptedException.class, () -> lua.eval("return 1", Duration.ofSeconds(1)));
+            assertTrue(Thread.currentThread().isInterrupted());
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    void suppliedWatchdogIsUsedAndNoThreadStarted() throws Exception {
+        // In a child JVM: here earlier tests may already have started the shared watchdog thread.
+        var p = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-cp", System.getProperty("java.class.path"), WasmValkeyLuaTest.class.getName())
+            .redirectErrorStream(true).start();
+        String out = new String(p.getInputStream().readAllBytes(), UTF_8);
+        assertEquals(0, p.waitFor(), out);
+        assertTrue(out.contains("TIMED OUT, checks 1, shared watchdog false"), out);
+    }
+
+    /** The child JVM of suppliedWatchdogIsUsedAndNoThreadStarted. */
+    public static void main(String[] args) {
+        var watchdog = new ScheduledThreadPoolExecutor(1);
+        var l = new WasmValkeyLua(WASM, a -> "+OK\r\n".getBytes(UTF_8), ServerInfo.DEFAULT,
+            WasmValkeyLua.DEFAULT_MAX_RETAINED_BYTES, watchdog);
+        try {
+            l.eval("while true do end", Duration.ofMillis(50));
+        } catch (ScriptTimeoutException e) {
+            boolean shared = Thread.getAllStackTraces().keySet().stream()
+                .anyMatch(t -> t.getName().equals("valkey-lua-watchdog"));
+            System.out.println("TIMED OUT, checks " + watchdog.getCompletedTaskCount() + ", shared watchdog " + shared);
+        }
+        watchdog.shutdown();
     }
 }

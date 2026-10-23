@@ -28,7 +28,7 @@ against the first eight; the shebang and timeout rows do block the scripts they 
 | `string.dump` output | Different bytes and length (98, not 106, for `function() return 'abc' end`). | Wasm | OK. | 2 |
 | `tostring` address width | `table: 0x1e3f0`, not a 64-bit address. Cosmetic. | Wasm | OK; addresses differ between servers anyway. | 2 |
 | No shebang | A script starting with `#!lua` (with or without `flags=`) fails to compile, so it does not run at all, and `no-writes` is never enforced. | Both | Blocker for any script with a shebang line. | 8 |
-| No script timeout | `while true do end` never returns: no `-BUSY`, no `SCRIPT KILL`. Interrupting the eval thread stops Wasm with `ScriptInterruptedException` and poisons the instance; JNI cannot be stopped short of ending the process. | Both | Blocker if scripts can be untrusted or buggy. | 8 |
+| No script timeout | `while true do end` never returns: no `-BUSY`, no `SCRIPT KILL`. Wasm: `eval(..., Duration timeout)` throws `ScriptTimeoutException` and resets the instance; interrupting the eval thread throws `ScriptInterruptedException` and poisons it. JNI cannot be stopped short of ending the process (the timed `eval` throws `UnsupportedOperationException`). | Both | Wasm: the embedder maps the timeout to a client reply. JNI: blocker if scripts can be untrusted or buggy. | 8 |
 | Error text without the script SHA | Uncaught errors end `script: on @user_script:1.`, as at `VALKEY_SHA`; released Valkey and Redis send `script: <sha1>, on @user_script:1.` | Both | Decide which Valkey is the target; only clients parsing error text see it. | 8 |
 | RESP3 | Every RESP3 reply type from the `Handler` raises `ERR unexpected reply from handler for server.call`, even after `setresp(3)` is accepted. | Both | Blocker only for scripts that call `setresp(3)`. | 8 |
 | Script-context rules | Commands not allowed from scripts, script-local `SELECT`, `no-writes` and `acl_check_cmd`'s command check are left to the `Handler`; a pass-through to a server runs `MULTI`, `EVAL`, `SUBSCRIBE` and `CLIENT REPLY OFF` for real. | Both | The embedder's job; README "Divergences from Valkey". | 8 |
@@ -386,6 +386,15 @@ and 98 (JNI) out of 272 differ, 68 of them only by the script SHA in the error t
   Here, after 10 s both backends are still running. `Thread.interrupt()` stops Wasm: `eval` throws
   `ScriptInterruptedException` (cause `ChicoryInterruptedException`) and poisons the instance (tests
   `interruptStopsInfiniteLoop`, `interruptStopsLongCCall`, `handlerInterruptingItsThreadStopsScript`). JNI is still running 5 s after the interrupt.
+
+  Wasm's timed `eval` interrupts only while Lua runs, never during a handler call, and consumes its own interrupt
+  (README "No script timeout"). Tests: `timeoutStopsInfiniteLoop`, `timeoutStopsLongCCall`,
+  `timeoutDuringHandlerWaitsForItThenStopsBeforeMoreLua`, `timeoutRaceNeverLeavesOrSendsAnInterrupt` (10,000 evals
+  around a 1 ms deadline), `otherInterruptDuringTimedEvalIsScriptInterrupted`, `timeoutWinsOverOtherInterruptWhichStaysSet`,
+  `timedEvalThatFinishesLeavesFlagUnchanged`, `timedEvalWithFlagSetOnEntryIsInterruptedAsUntimed`,
+  `suppliedWatchdogIsUsedAndNoThreadStarted`. Remaining: an outside interrupt landing between the watchdog's flag
+  check and its interrupt is consumed with the library's; a Lua count hook instead of interrupts would close that
+  for Lua code, but a long C call still needs the interrupt.
 - **Error text.** At `VALKEY_SHA`, Lua is a module, and `script_lua.c` formats an uncaught error as
   `"%s script: on %s:%s."`. Valkey 8.1/9.0 and Redis include the script's SHA1:
   `script: 694a5fe1…, on @user_script:1.`. Valkey 8.1 also says `This Redis command is not allowed from script`, where
