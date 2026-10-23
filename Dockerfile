@@ -20,4 +20,5 @@ WORKDIR /src
 COPY . .
 COPY --from=wasm /src/lua/lua.wasm lua/
 RUN make -C native
-CMD ["mvn", "-f", "java", "test"]
+# Both are built above, so skip the pom's make steps (lua's would rebuild from scratch under emulation).
+CMD ["mvn", "-f", "java", "-Dexec.skip", "test"]

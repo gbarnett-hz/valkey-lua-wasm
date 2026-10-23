@@ -90,7 +90,6 @@ Per-eval allocation is comparable except `calls` (finding 3); JMH recorded 5.7 s
 ## Reproducing
 
 ```sh
-make -C lua && make -C native
 cd java && mvn install -DskipTests && cd ..
 mvn -f bench/pom.xml package
 bench/jmh.sh bench/results/jmh.json

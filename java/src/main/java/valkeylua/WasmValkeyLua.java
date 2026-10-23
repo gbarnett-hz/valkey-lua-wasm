@@ -15,7 +15,6 @@ import com.dylibso.chicory.wasm.types.FunctionType;
 import com.dylibso.chicory.wasm.types.ValType;
 
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -51,12 +50,12 @@ public final class WasmValkeyLua extends ValkeyLua {
     // Op codes of env.host_call; keep in sync with the enum in valkey_lua.c.
     private static final int OP_CALL = 0, OP_SETRESP = 1, OP_SET_REPL = 2, OP_LOG = 3, OP_ACL_CHECK_CMD = 4;
 
-    public WasmValkeyLua(Path wasm, Handler handler) {
-        this(wasm, handler, ServerInfo.DEFAULT);
+    public WasmValkeyLua(Handler handler) {
+        this(handler, ServerInfo.DEFAULT);
     }
 
-    public WasmValkeyLua(Path wasm, Handler handler, ServerInfo info) {
-        this(wasm, handler, info, DEFAULT_MAX_RETAINED_BYTES);
+    public WasmValkeyLua(Handler handler, ServerInfo info) {
+        this(handler, info, DEFAULT_MAX_RETAINED_BYTES);
     }
 
     /**
@@ -64,12 +63,12 @@ public final class WasmValkeyLua extends ValkeyLua {
      * releasing the memory. Nothing a script can observe carries over in the old instance except math.random's state,
      * which is copied.
      */
-    public WasmValkeyLua(Path wasm, Handler handler, ServerInfo info, long maxRetainedBytes) {
-        this(wasm, handler, info, maxRetainedBytes, SHARED_WATCHDOG);
+    public WasmValkeyLua(Handler handler, ServerInfo info, long maxRetainedBytes) {
+        this(handler, info, maxRetainedBytes, SHARED_WATCHDOG);
     }
 
     /** watchdog runs the deadline checks of timed evals, in place of a daemon thread shared by all instances. */
-    public WasmValkeyLua(Path wasm, Handler handler, ServerInfo info, long maxRetainedBytes,
+    public WasmValkeyLua(Handler handler, ServerInfo info, long maxRetainedBytes,
             ScheduledExecutorService watchdog) {
         this.watchdog = watchdog;
         var wasi = WasiPreview1.builder().withOptions(WasiOptions.builder().build()).build();
@@ -92,7 +91,8 @@ public final class WasmValkeyLua extends ValkeyLua {
                     return null;
                 });
         imports = ImportValues.builder().addFunction(wasi.toHostFunctions()).addFunction(redis).build();
-        module = Parser.parse(wasm);
+        // Bundled by the build (java/pom.xml runs make -C ../lua).
+        module = Parser.parse(WasmValkeyLua.class.getResourceAsStream("lua.wasm"));
         // Compile lua.wasm to JVM bytecode once; ~20-40x faster than the default interpreter.
         machineFactory = MachineFactoryCompiler.compile(module);
         this.info = info;

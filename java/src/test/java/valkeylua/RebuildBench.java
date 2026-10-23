@@ -2,7 +2,6 @@ package valkeylua;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-import java.nio.file.Path;
 import java.util.List;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -28,7 +27,6 @@ import java.util.concurrent.TimeUnit;
 @Measurement(iterations = 5, time = 2)
 public class RebuildBench {
 
-    static final Path WASM = Path.of("../lua/lua.wasm");
     static final Handler HANDLER = args -> "$3\r\nbar\r\n".getBytes(UTF_8);
 
     @Param({"return 1", "return server.call('GET', KEYS[1])"})
@@ -38,7 +36,7 @@ public class RebuildBench {
 
     @Setup(Level.Trial)
     public void setup() {
-        lua = new WasmValkeyLua(WASM, HANDLER);
+        lua = new WasmValkeyLua(HANDLER);
     }
 
     @Benchmark

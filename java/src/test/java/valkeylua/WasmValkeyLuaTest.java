@@ -21,11 +21,9 @@ import org.junit.jupiter.api.Test;
 
 class WasmValkeyLuaTest extends ValkeyLuaTest {
 
-    static final Path WASM = Path.of("../lua/lua.wasm");
-
     @Override
     ValkeyLua create(Handler handler, ServerInfo info) {
-        return new WasmValkeyLua(WASM, handler, info);
+        return new WasmValkeyLua(handler, info);
     }
 
     @Test
@@ -120,8 +118,8 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
     void memoryAboveMaxRetainedIsReleasedAndRandomContinues() {
         // Wasm memory never shrinks; the instance is rebuilt instead (gaps.md section 5). The rebuild must not restart
         // math.random, whose state lives for the instance on Valkey and JNI.
-        var grown = new WasmValkeyLua(WASM, args -> "+OK\r\n".getBytes(UTF_8));
-        var other = new WasmValkeyLua(WASM, args -> "+OK\r\n".getBytes(UTF_8));
+        var grown = new WasmValkeyLua(args -> "+OK\r\n".getBytes(UTF_8));
+        var other = new WasmValkeyLua(args -> "+OK\r\n".getBytes(UTF_8));
         long initial = grown.memoryBytes();
         String random = "return math.random(1000) .. ' ' .. math.random(1000)";
         assertEquals(other.eval(random), grown.eval(random));
@@ -307,7 +305,7 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
     /** The child JVM of suppliedWatchdogIsUsedAndNoThreadStarted. */
     public static void main(String[] args) {
         var watchdog = new ScheduledThreadPoolExecutor(1);
-        var l = new WasmValkeyLua(WASM, a -> "+OK\r\n".getBytes(UTF_8), ServerInfo.DEFAULT,
+        var l = new WasmValkeyLua(a -> "+OK\r\n".getBytes(UTF_8), ServerInfo.DEFAULT,
             WasmValkeyLua.DEFAULT_MAX_RETAINED_BYTES, watchdog);
         try {
             l.eval("while true do end", Duration.ofMillis(50));
