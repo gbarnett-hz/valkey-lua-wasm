@@ -67,32 +67,36 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
         assertTrue(flagSet.get());
         long ms = (thrownAt.get() - interruptedAt) / 1_000_000;
         assertTrue(ms < 50, "eval took " + ms + " ms to stop");
-        assertPoisonedThenReset();
+        assertPoisonedThenReset(lua);
     }
 
-    private void assertPoisonedThenReset() {
-        assertThrows(IllegalStateException.class, () -> lua.eval("return 1"));
-        ((WasmValkeyLua) lua).reset();
-        assertEquals(result(true, integer(1)), lua.eval("return 1"));
+    private void assertPoisonedThenReset(ValkeyLua l) {
+        assertThrows(IllegalStateException.class, () -> l.eval("return 1"));
+        ((WasmValkeyLua) l).reset();
+        assertEquals(result(true, integer(1)), l.eval("return 1"));
     }
 
     @Test
     void handlerInterruptingItsThreadStopsScript() throws Exception {
         var thrown = new AtomicReference<Throwable>();
+        var flagSet = new AtomicBoolean();
+        var l = create(args -> {
+            Thread.currentThread().interrupt();
+            return "+OK\r\n".getBytes(UTF_8);
+        });
         var t = new Thread(() -> {
-            var l = create(args -> {
-                Thread.currentThread().interrupt();
-                return "+OK\r\n".getBytes(UTF_8);
-            });
             try {
                 l.eval("redis.call('ping') while true do end");
             } catch (Throwable e) {
                 thrown.set(e);
             }
+            flagSet.set(Thread.currentThread().isInterrupted());
         });
         t.start();
         t.join(5000);
         assertInstanceOf(ScriptInterruptedException.class, thrown.get());
+        assertTrue(flagSet.get());
+        assertPoisonedThenReset(l);
     }
 
     @Test
