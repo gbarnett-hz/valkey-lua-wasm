@@ -5,8 +5,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.dylibso.chicory.runtime.ChicoryInterruptedException;
 import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
@@ -26,6 +30,76 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
         assertThrows(IllegalStateException.class, () -> lua.eval("return 1"));
         ((WasmValkeyLua) lua).reset();
         assertEquals(result(true, integer(1)), lua.eval("return 1"));
+    }
+
+    @Test
+    void interruptStopsInfiniteLoop() throws Exception {
+        assertInterruptStops("while true do end");
+    }
+
+    @Test
+    void interruptStopsLongCCall() throws Exception {
+        // About 4 s on Redis 8.8.0, all inside str_find's backtracking.
+        assertInterruptStops("return string.find(string.rep('a', 26), string.rep('a?', 26) .. string.rep('a', 26))");
+    }
+
+    /** Interrupts the eval thread after 100 ms; eval must throw ScriptInterruptedException promptly, flag left set. */
+    private void assertInterruptStops(String script) throws Exception {
+        var thrown = new AtomicReference<Throwable>();
+        var flagSet = new AtomicBoolean();
+        var thrownAt = new AtomicLong();
+        var t = new Thread(() -> {
+            try {
+                lua.eval(script);
+            } catch (Throwable e) {
+                thrownAt.set(System.nanoTime());
+                thrown.set(e);
+            }
+            flagSet.set(Thread.currentThread().isInterrupted());
+        });
+        t.start();
+        Thread.sleep(100);
+        long interruptedAt = System.nanoTime();
+        t.interrupt();
+        t.join(5000);
+        assertInstanceOf(ScriptInterruptedException.class, thrown.get());
+        assertInstanceOf(ChicoryInterruptedException.class, thrown.get().getCause());
+        assertTrue(flagSet.get());
+        long ms = (thrownAt.get() - interruptedAt) / 1_000_000;
+        assertTrue(ms < 50, "eval took " + ms + " ms to stop");
+        assertPoisonedThenReset();
+    }
+
+    private void assertPoisonedThenReset() {
+        assertThrows(IllegalStateException.class, () -> lua.eval("return 1"));
+        ((WasmValkeyLua) lua).reset();
+        assertEquals(result(true, integer(1)), lua.eval("return 1"));
+    }
+
+    @Test
+    void handlerInterruptingItsThreadStopsScript() throws Exception {
+        var thrown = new AtomicReference<Throwable>();
+        var t = new Thread(() -> {
+            var l = create(args -> {
+                Thread.currentThread().interrupt();
+                return "+OK\r\n".getBytes(UTF_8);
+            });
+            try {
+                l.eval("redis.call('ping') while true do end");
+            } catch (Throwable e) {
+                thrown.set(e);
+            }
+        });
+        t.start();
+        t.join(5000);
+        assertInstanceOf(ScriptInterruptedException.class, thrown.get());
+    }
+
+    @Test
+    void otherPoisoningIsNotAnInterrupt() {
+        var e = assertThrows(RuntimeException.class,
+            () -> lua.eval("return setmetatable({err='x'}, {__index = function() error('boom') end})"));
+        assertEquals(IllegalStateException.class, e.getClass());
     }
 
     @Test

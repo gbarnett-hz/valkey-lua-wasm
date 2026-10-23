@@ -353,8 +353,12 @@ Found by diffing 278 probe scripts against `valkey-server` built at `VALKEY_SHA`
   user_script:1: unexpected symbol near '#'`.
 - **No script timeout.** Valkey checks every 100,000 instructions: after the busy threshold other clients get `-BUSY`,
   and `SCRIPT KILL` ends the script with `-ERR Script killed by user with SCRIPT KILL.` (`pcall` can't catch it).
-  Here `while true do end` never returns. On Wasm, `Thread.interrupt()` on the eval thread stops it, but
-  `ChicoryInterruptedException` escapes `eval` and poisons the instance. On JNI the script keeps running on its pool
+  Here `while true do end` never returns. On Wasm, `Thread.interrupt()` on the eval thread stops it within tens of
+  milliseconds, also inside a long C call such as `string.find` backtracking: `eval` throws
+  `ScriptInterruptedException` (cause: Chicory's `ChicoryInterruptedException`) and the instance is poisoned until
+  `reset()`. A handler can abort the script the same way by interrupting its own thread before returning. The library
+  neither clears nor sets the interrupt flag: after the exception it is still set, and the embedder owns it. On JNI
+  `eval` waits uninterruptibly and never throws `ScriptInterruptedException`: the script keeps running on its pool
   thread and an interrupted caller keeps waiting (still running 5 s after `interrupt()`); only ending the process
   stops it.
 - **Script-context rules are the Handler's job.** Valkey runs script commands in script mode; a handler that forwards

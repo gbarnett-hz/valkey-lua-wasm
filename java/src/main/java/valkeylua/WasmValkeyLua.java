@@ -1,6 +1,7 @@
 package valkeylua;
 
 import com.dylibso.chicory.compiler.MachineFactoryCompiler;
+import com.dylibso.chicory.runtime.ChicoryInterruptedException;
 import com.dylibso.chicory.runtime.HostFunction;
 import com.dylibso.chicory.runtime.ImportValues;
 import com.dylibso.chicory.runtime.Instance;
@@ -122,6 +123,18 @@ public final class WasmValkeyLua extends ValkeyLua {
 
     @Override
     Result evalUnchecked(String script, byte[] kv) {
+        try {
+            return run(script, kv);
+        } catch (RuntimeException e) {
+            // Chicory or a host call may have wrapped it.
+            for (Throwable c = e; c != null; c = c.getCause()) {
+                if (c instanceof ChicoryInterruptedException) throw new ScriptInterruptedException(c);
+            }
+            throw e;
+        }
+    }
+
+    private Result run(String script, byte[] kv) {
         byte[] src = script.getBytes(StandardCharsets.UTF_8);
         int ptr = (int) instance.export("alloc").apply(src.length)[0];
         int kvPtr = (int) instance.export("alloc").apply(kv.length)[0];
