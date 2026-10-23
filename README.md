@@ -10,22 +10,24 @@ API delegated to a `Handler`. Two backends behind one API (`ValkeyLua`) and one 
 | Isolation | Wasm sandbox; nothing native | native code in the JVM; a Lua panic would kill the JVM (guarded, see below) |
 | Integer width | 64-bit, as Valkey (patched; pointers and `size_t` stay 32-bit) | 64-bit, as Valkey |
 | Build | wasi-sdk | host C/C++ compiler, JNI headers |
-| Construct | `new WasmValkeyLua(Path wasm, handler[, info[, maxRetainedBytes[, watchdog]]])` | `new JniValkeyLua(handler[, info])` |
+| Construct | `new WasmValkeyLua(handler[, info[, maxRetainedBytes[, watchdog]]])` | `new JniValkeyLua(handler[, info])` |
 | `eval(..., Duration timeout)` | throws `ScriptTimeoutException` past the timeout | throws `UnsupportedOperationException` |
 
 Both give 64-bit Valkey's results; the few remaining differences are in [Where the backends differ](#where-the-backends-differ).
 
 ```sh
-make -C lua            # downloads wasi-sdk 34 + pinned Valkey sources, builds lua/lua.wasm
-make -C native         # downloads luajava's JNI glue + pinned Valkey sources, builds native/build/liblua51<arch>.<so|dylib>
-cd java && mvn test    # runs ValkeyLuaTest against both backends (WasmValkeyLuaTest, JniValkeyLuaTest)
+cd java && mvn install   # builds everything, runs ValkeyLuaTest on both backends, installs to ~/.m2
 ```
+
+The build runs `make -C lua` (downloads wasi-sdk 34 + pinned Valkey sources, builds `lua/lua.wasm`) and `make -C native`
+(downloads luajava's JNI glue + pinned Valkey sources, builds `native/build/liblua51<arch>.<so|dylib>`). The jar,
+`com.hazelcast:experimental.lua:0.1.0-SNAPSHOT`, bundles `lua.wasm` and this platform's natives.
 
 `make -C lua clean` / `make -C native clean` remove the build outputs and keep the downloaded `.deps`. `make -C lua`
 re-extracts Valkey's sources by itself when `VALKEY_SHA` or a file in `lua/patches/` changes. `native/` doesn't: after
 changing its pinned Valkey sources, `rm -rf native/.deps/valkey`.
-On macOS 27 Command Line Tools, clang++ may not find libc++ headers; pass
-`CXXFLAGS="-isystem $(xcrun --show-sdk-path)/usr/include/c++/v1"` to `make -C native`.
+On macOS, `native/Makefile` defaults `CXXFLAGS` to the SDK's libc++ headers, which macOS 27's Command Line Tools
+leave off clang++'s search path.
 
 The same suite on Linux x86_64, the deployment target (emulated on an arm64 Mac; takes a few minutes):
 
@@ -205,7 +207,7 @@ Handler handler = args -> {
             return ("-ERR unknown command '" + cmd + "'\r\n").getBytes();
     }
 };
-var vl = new JniValkeyLua(handler);   // or new WasmValkeyLua(Path.of("lua/lua.wasm"), handler)
+var vl = new JniValkeyLua(handler);   // or new WasmValkeyLua(handler)
 var r = vl.eval("redis.call('SET', KEYS[1], ARGV[1]); return redis.call('GET', KEYS[1])",
         List.of("k".getBytes()), List.of("v".getBytes()));   // Result[ok=true, reply=$1\r\nv\r\n]
 ```

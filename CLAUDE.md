@@ -10,13 +10,15 @@ delegated to a Java `Handler`. Two backends behind one API; the goal is scripts 
 ```sh
 make -C lua      # wasi-sdk 34 + pinned Valkey sources → lua/lua.wasm (patches applied automatically)
 make -C native   # luajava JNI glue + Valkey sources → native/build/liblua51<arch>.<dylib|so>
-cd java && mvn test                                        # whole suite, both backends (needs both builds above)
+cd java && mvn test                                        # whole suite, both backends (runs both makes first)
+cd java && mvn install                                     # com.hazelcast:experimental.lua into ~/.m2
 cd java && mvn test -Dtest='WasmValkeyLuaTest#testName'    # one test, one backend
 cd java && mvn test -Dtest='*ValkeyLuaTest#testName'       # one shared test, both backends
 docker build --platform linux/amd64 -t valkey-lua . && docker run --rm --platform linux/amd64 valkey-lua  # Linux x86_64
 ```
 
-- macOS 27 Command Line Tools: `make -C native CXXFLAGS="-isystem $(xcrun --show-sdk-path)/usr/include/c++/v1"`.
+- The jar bundles `lua.wasm` (as `valkeylua/lua.wasm`, which `WasmValkeyLua` always loads) and this platform's natives.
+- On macOS `native/Makefile` defaults `CXXFLAGS` to the SDK's libc++ headers (missing on macOS 27 Command Line Tools).
 - `make -C lua` re-extracts Valkey by itself when `VALKEY_SHA` or a `lua/patches/*.patch` changes. `native/` does not:
   after changing its sources, `rm -rf native/.deps/valkey` (or `native/.deps/luajava` after changing its luajava
   patch step).

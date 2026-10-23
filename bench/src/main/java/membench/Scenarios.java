@@ -1,7 +1,6 @@
 package membench;
 
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
 import java.util.List;
 import valkeylua.Handler;
 import valkeylua.JniValkeyLua;
@@ -11,7 +10,6 @@ import valkeylua.WasmValkeyLua;
 /** Workloads shared by the JMH benchmark and the footprint probe. */
 final class Scenarios {
 
-    static final Path WASM = Path.of(System.getProperty("wasm", "lua.wasm"));
     static final List<byte[]> KEYS = List.of("key:1".getBytes(StandardCharsets.UTF_8));
     static final List<byte[]> ARGS = List.of("v".repeat(100).getBytes(StandardCharsets.UTF_8));
     // Stub redis.call: a fixed 100-byte bulk reply, so host-call cost is the same on both backends.
@@ -36,7 +34,7 @@ final class Scenarios {
 
     static ValkeyLua create(String backend) {
         return switch (backend) {
-            case "wasm" -> new WasmValkeyLua(WASM, HANDLER);
+            case "wasm" -> new WasmValkeyLua(HANDLER);
             case "jni" -> new JniValkeyLua(HANDLER);
             default -> throw new IllegalArgumentException(backend);
         };

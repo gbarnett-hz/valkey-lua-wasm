@@ -14,6 +14,8 @@ ARCH := $(shell uname -m)
 ifeq ($(OS),Darwin)
 JNI_PLATFORM := mac
 LIB := liblua51$(if $(filter arm64,$(ARCH)),arm64,64).dylib
+# macOS 27's Command Line Tools leave the SDK's libc++ headers off clang++'s search path.
+CXXFLAGS ?= -isystem $(shell xcrun --show-sdk-path)/usr/include/c++/v1
 else
 JNI_PLATFORM := linux
 LIB := liblua51$(if $(filter aarch64 arm64,$(ARCH)),arm64,64).so
