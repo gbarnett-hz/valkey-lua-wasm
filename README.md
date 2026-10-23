@@ -325,7 +325,8 @@ exception, never a silently wrong value. An error reply is never "wrong type": i
    no message), so a buggy mapping becomes a script error instead of unwinding past Lua. A handler returning `null`
    becomes `-ERR handler returned null`. If anything still escapes `eval` (e.g. a raising `__index` on an
    error table while the reply is built, or Chicory's own call-stack limit), that `eval` rethrows and the instance is poisoned: every later `eval` throws
-   `IllegalStateException`; create a new `ValkeyLua`.
+   `IllegalStateException`; call `WasmValkeyLua.reset()` (a fresh instance from the already-compiled module, well
+   under a millisecond, where a new `WasmValkeyLua` recompiles it) or create a new `JniValkeyLua`.
 7. `eval` returns `Result(ok, reply)`: `reply` is the RESP2 reply Valkey would send the client, for success and
    failure. An uncaught error gives `ok=false` and Valkey's error reply, e.g. `error('x')` gives
    `-ERR user_script:1: x script: on @user_script:1.`; a script that *returns* `{err=...}` gives `ok=true` and an

@@ -52,6 +52,10 @@ public abstract sealed class ValkeyLua permits WasmValkeyLua, JniValkeyLua {
 
     ValkeyLua() {}
 
+    void clearPoisoned() {
+        poisoned = false;
+    }
+
     public Result eval(String script) {
         return eval(script, List.of(), List.of());
     }

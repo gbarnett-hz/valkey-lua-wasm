@@ -20,6 +20,15 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
     }
 
     @Test
+    void resetRecoversPoisonedInstance() {
+        assertThrows(IllegalStateException.class,
+            () -> lua.eval("return setmetatable({err='x'}, {__index = function() error('boom') end})"));
+        assertThrows(IllegalStateException.class, () -> lua.eval("return 1"));
+        ((WasmValkeyLua) lua).reset();
+        assertEquals(result(true, integer(1)), lua.eval("return 1"));
+    }
+
+    @Test
     void memoryCapIsAnOrdinaryLuaError() {
         // Chicory caps linear memory at 32767 pages; JNI succeeds here, so this is Wasm-only (gaps.md section 5).
         // Doubling by concatenation (bulk copies) reaches the cap in about a second; string.rep builds byte by byte.
