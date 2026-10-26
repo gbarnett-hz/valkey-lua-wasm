@@ -100,3 +100,19 @@ python3 bench/summarize.py bench/results/footprint.txt
 ```
 
 The footprint probe uses macOS's `footprint(1)`.
+
+## Shared compiled module (2026-10-26)
+
+`WasmValkeyLua` now parses and compiles `lua.wasm` once per JVM; instances share the `WasmModule` and the generated
+classes and keep their own `Instance` and linear memory. Same probe, same machine, `noop` workload, 10 forks per
+config, before at `bf6f6a6` and after with the change (`bench/results/shared-module-{before,after}.txt`). MiB over
+baseline after 20 evals per instance, median; "per extra instance" is (×8 − ×1) / 7:
+
+| | Live heap ×1 | ×8 | Per extra instance | Metaspace ×8 | Code cache ×8 | Footprint ×8 | NMT committed ×8 |
+|---|---|---|---|---|---|---|---|
+| Before | 18.71 | 132.58 | 16.27 | 14.90 | 8.62 | 467.6 | 409.6 |
+| After | 18.71 | 78.23 | 8.50 | 9.03 | 5.14 | 308.0 | 308.2 |
+
+The first instance costs the same. Each later one drops from 16.3 to 8.5 MiB of live heap, which is now almost all
+linear memory (130 pages, 8.1 MiB, mostly the 8 MiB C stack), and from 0.95 to 0.11 MiB of Metaspace. At 32
+instances that is about 282 MiB of live heap in place of 523.

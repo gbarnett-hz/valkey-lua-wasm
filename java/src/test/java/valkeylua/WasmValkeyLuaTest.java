@@ -11,7 +11,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.dylibso.chicory.runtime.ChicoryInterruptedException;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -33,6 +36,30 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
         assertThrows(IllegalStateException.class, () -> lua.eval("return 1"));
         ((WasmValkeyLua) lua).reset();
         assertEquals(result(true, integer(1)), lua.eval("return 1"));
+    }
+
+    @Test
+    void instancesSharingCompiledModuleRunConcurrently() throws Exception {
+        int n = 8;
+        var pool = Executors.newFixedThreadPool(n);
+        try {
+            var tasks = new ArrayList<Callable<Void>>();
+            for (int i = 0; i < n; i++) {
+                int id = i;
+                tasks.add(() -> {
+                    WasmValkeyLua l = new WasmValkeyLua(args -> (":" + id + "\r\n").getBytes(UTF_8));
+                    for (int j = 0; j < 200; j++) {
+                        assertEquals(integer(id * 1000 + j),
+                            okOn(l, "return redis.call('get') * 1000 + #string.rep('a', " + j + ")"));
+                        if (j == 100) l.reset();
+                    }
+                    return null;
+                });
+            }
+            for (var f : pool.invokeAll(tasks)) f.get();
+        } finally {
+            pool.shutdown();
+        }
     }
 
     @Test
@@ -309,7 +336,7 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
     /** The child JVM of suppliedWatchdogIsUsedAndNoThreadStarted. */
     public static void main(String[] args) {
         var watchdog = new ScheduledThreadPoolExecutor(1);
-        var l = new WasmValkeyLua(a -> "+OK\r\n".getBytes(UTF_8), ServerInfo.DEFAULT,
+        WasmValkeyLua l = new WasmValkeyLua(a -> "+OK\r\n".getBytes(UTF_8), ServerInfo.DEFAULT,
             WasmValkeyLua.DEFAULT_MAX_RETAINED_BYTES, watchdog);
         try {
             l.eval("while true do end", Duration.ofMillis(50));

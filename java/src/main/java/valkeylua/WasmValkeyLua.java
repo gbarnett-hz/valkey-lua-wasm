@@ -31,8 +31,6 @@ import java.util.function.Function;
  */
 public final class WasmValkeyLua extends ValkeyLua {
 
-    private final WasmModule module;
-    private final Function<Instance, Machine> machineFactory;
     private final ImportValues imports;
     private final ServerInfo info;
     private final long maxRetainedBytes;
@@ -91,18 +89,13 @@ public final class WasmValkeyLua extends ValkeyLua {
                     return null;
                 });
         imports = ImportValues.builder().addFunction(wasi.toHostFunctions()).addFunction(redis).build();
-        // Bundled by the build (java/pom.xml runs make -C ../lua).
-        module = Parser.parse(WasmValkeyLua.class.getResourceAsStream("lua.wasm"));
-        // Compile lua.wasm to JVM bytecode once; ~20-40x faster than the default interpreter.
-        machineFactory = MachineFactoryCompiler.compile(module);
         this.info = info;
         this.maxRetainedBytes = maxRetainedBytes;
         rebuild();
     }
 
     /**
-     * Replaces the instance with a fresh one from the module compiled at construction (well under a millisecond, where
-     * constructing a new WasmValkeyLua compiles it again) and makes a poisoned instance usable again. As with the
+     * Replaces the instance with a fresh one (well under a millisecond) and makes a poisoned instance usable again. As with the
      * rebuild past maxRetainedBytes, only math.random's state carries over.
      */
     public void reset() {
@@ -113,9 +106,9 @@ public final class WasmValkeyLua extends ValkeyLua {
     /** Replaces the instance with a fresh one, dropping its linear memory. */
     void rebuild() {
         var old = instance;
-        instance = Instance.builder(module)
+        instance = Instance.builder(Compiled.MODULE)
                 .withImportValues(imports)
-                .withMachineFactory(machineFactory)
+                .withMachineFactory(Compiled.MACHINE_FACTORY)
                 .withStart(false)
                 .build();
         instance.export("_initialize").apply();
@@ -275,6 +268,17 @@ public final class WasmValkeyLua extends ValkeyLua {
             if (state.get() == INTERRUPTED && sent) Thread.interrupted();
             state.set(EXPIRED);
         }
+    }
+
+    /**
+     * lua.wasm, parsed and compiled once per JVM on first use. Every instance shares the module and the generated
+     * classes (so HotSpot profiles and compiles them once); each has its own Instance, linear memory and globals.
+     */
+    private static final class Compiled {
+        // Bundled by the build (java/pom.xml runs make -C ../lua).
+        static final WasmModule MODULE = Parser.parse(WasmValkeyLua.class.getResourceAsStream("lua.wasm"));
+        // Compiled to JVM bytecode; ~20-40x faster than the default interpreter. Stateless, so shared across threads.
+        static final Function<Instance, Machine> MACHINE_FACTORY = MachineFactoryCompiler.compile(MODULE);
     }
 
     private static ScheduledExecutorService sharedWatchdog() {
