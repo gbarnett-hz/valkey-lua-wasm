@@ -46,7 +46,8 @@ skill's source and content hash, not a commit, so a restore fetches upstream's c
 
 - Lua errors use `setjmp`/`longjmp`, compiled to standard Wasm exception handling
   (`-mllvm -wasm-enable-sjlj -lsetjmp -mllvm -wasm-use-legacy-eh=false`). Chicory rejects the legacy EH opcodes, so the last flag is required.
-- Runs on Chicory's runtime compiler (`lua.wasm` → JVM bytecode at instantiation), not the default interpreter.
+- Runs on Chicory's runtime compiler (`lua.wasm` → JVM bytecode), not the default interpreter. It parses and compiles
+  once per JVM, when the first `WasmValkeyLua` is created; every instance shares the module and generated classes.
 - The module exports `eval(src_ptr, src_len, kv_ptr, kv_len) -> status` and `result_ptr`/`result_len`.
 - 64-bit integers, as on Valkey: `-DLUA_USELONGLONG`, `-DSTRUCT_INT='long long'` and six patches in `lua/patches/`
   (`luaconf.h`, `lua_struct.c`, `lbaselib.c`, `lstrlib.c`, `lua_cmsgpack.c`, `lapi.c`), applied with `patch -F 0` so one that
@@ -329,7 +330,7 @@ exception, never a silently wrong value. An error reply is never "wrong type": i
    becomes `-ERR handler returned null`. If anything still escapes `eval` (e.g. a raising `__index` on an
    error table while the reply is built, or Chicory's own call-stack limit), that `eval` rethrows and the instance is poisoned: every later `eval` throws
    `IllegalStateException`; call `WasmValkeyLua.reset()` (a fresh instance from the already-compiled module, well
-   under a millisecond, where a new `WasmValkeyLua` recompiles it) or create a new `JniValkeyLua`.
+   under a millisecond) or create a new `JniValkeyLua`.
 7. `eval` returns `Result(ok, reply)`: `reply` is the RESP2 reply Valkey would send the client, for success and
    failure. An uncaught error gives `ok=false` and Valkey's error reply, e.g. `error('x')` gives
    `-ERR user_script:1: x script: on @user_script:1.`; a script that *returns* `{err=...}` gives `ok=true` and an
