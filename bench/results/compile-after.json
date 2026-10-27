@@ -1,0 +1,1282 @@
+[
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.compile",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "wasm",
+            "size" : "noop"
+        },
+        "primaryMetric" : {
+            "score" : 15.792795821019451,
+            "scoreError" : 0.4385345963880449,
+            "scoreConfidence" : [
+                15.354261224631406,
+                16.231330417407495
+            ],
+            "scorePercentiles" : {
+                "0.0" : 15.385452092337692,
+                "50.0" : 15.603332376149787,
+                "90.0" : 16.373973200969953,
+                "95.0" : 16.37639749207076,
+                "99.0" : 16.37639749207076,
+                "99.9" : 16.37639749207076,
+                "99.99" : 16.37639749207076,
+                "99.999" : 16.37639749207076,
+                "99.9999" : 16.37639749207076,
+                "100.0" : 16.37639749207076
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    15.681285203649704,
+                    15.603332376149787,
+                    15.522004817837637,
+                    15.543641384554505,
+                    15.627544000562008
+                ],
+                [
+                    15.442619287932137,
+                    15.4141787389105,
+                    15.393744135246973,
+                    15.57423895321223,
+                    15.385452092337692
+                ],
+                [
+                    16.32047527515114,
+                    16.37235700690275,
+                    16.334591686941756,
+                    16.300074863832208,
+                    16.37639749207076
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.compile",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "wasm",
+            "size" : "small"
+        },
+        "primaryMetric" : {
+            "score" : 105.0223524724904,
+            "scoreError" : 3.674464566221874,
+            "scoreConfidence" : [
+                101.34788790626853,
+                108.69681703871227
+            ],
+            "scorePercentiles" : {
+                "0.0" : 100.3018799439271,
+                "50.0" : 106.34702110845929,
+                "90.0" : 109.0021173986342,
+                "95.0" : 111.34878520617984,
+                "99.0" : 111.34878520617984,
+                "99.9" : 111.34878520617984,
+                "99.99" : 111.34878520617984,
+                "99.999" : 111.34878520617984,
+                "99.9999" : 111.34878520617984,
+                "100.0" : 111.34878520617984
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    100.3327984655501,
+                    100.75574508818653,
+                    100.52413163844646,
+                    100.3018799439271,
+                    101.34758962168723
+                ],
+                [
+                    106.49874241456403,
+                    106.04243569539926,
+                    106.07398797796843,
+                    106.34702110845929,
+                    106.62480941239032
+                ],
+                [
+                    111.34878520617984,
+                    107.24877203679931,
+                    107.43767219360377,
+                    107.18306425402255,
+                    107.26785203017172
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.compile",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "wasm",
+            "size" : "large"
+        },
+        "primaryMetric" : {
+            "score" : 1958.4893655323795,
+            "scoreError" : 107.00199750405389,
+            "scoreConfidence" : [
+                1851.4873680283256,
+                2065.4913630364335
+            ],
+            "scorePercentiles" : {
+                "0.0" : 1828.566795620438,
+                "50.0" : 1934.6181697203472,
+                "90.0" : 2099.917701537888,
+                "95.0" : 2156.519755387931,
+                "99.0" : 2156.519755387931,
+                "99.9" : 2156.519755387931,
+                "99.99" : 2156.519755387931,
+                "99.999" : 2156.519755387931,
+                "99.9999" : 2156.519755387931,
+                "100.0" : 2156.519755387931
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    1934.6181697203472,
+                    1908.5434110371075,
+                    2038.574549898167,
+                    1972.308546705998,
+                    1931.5108681424447
+                ],
+                [
+                    2156.519755387931,
+                    2038.9551089613035,
+                    2038.913194105691,
+                    2062.1829989711932,
+                    2043.6515881753312
+                ],
+                [
+                    1846.0097629151292,
+                    1874.8136108512629,
+                    1828.566795620438,
+                    1857.6681712962964,
+                    1844.5039511970533
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.compile",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "jni",
+            "size" : "noop"
+        },
+        "primaryMetric" : {
+            "score" : 7.286254967520956,
+            "scoreError" : 0.09387234980384014,
+            "scoreConfidence" : [
+                7.192382617717116,
+                7.3801273173247965
+            ],
+            "scorePercentiles" : {
+                "0.0" : 7.184866195568042,
+                "50.0" : 7.281891327595865,
+                "90.0" : 7.4350615050526985,
+                "95.0" : 7.443968478236653,
+                "99.0" : 7.443968478236653,
+                "99.9" : 7.443968478236653,
+                "99.99" : 7.443968478236653,
+                "99.999" : 7.443968478236653,
+                "99.9999" : 7.443968478236653,
+                "100.0" : 7.443968478236653
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    7.357074351669761,
+                    7.429123522930062,
+                    7.443968478236653,
+                    7.347230313157297,
+                    7.281891327595865
+                ],
+                [
+                    7.199536952695665,
+                    7.314477086677368,
+                    7.277636168953965,
+                    7.362144803750344,
+                    7.233098489905641
+                ],
+                [
+                    7.194670307588523,
+                    7.189357429963677,
+                    7.286697262825503,
+                    7.192051821295981,
+                    7.184866195568042
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.compile",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "jni",
+            "size" : "small"
+        },
+        "primaryMetric" : {
+            "score" : 17.600733769892372,
+            "scoreError" : 0.2111484734674163,
+            "scoreConfidence" : [
+                17.389585296424954,
+                17.81188224335979
+            ],
+            "scorePercentiles" : {
+                "0.0" : 17.482148041258686,
+                "50.0" : 17.538115689756218,
+                "90.0" : 17.906056460177723,
+                "95.0" : 18.288234475902076,
+                "99.0" : 18.288234475902076,
+                "99.9" : 18.288234475902076,
+                "99.99" : 18.288234475902076,
+                "99.999" : 18.288234475902076,
+                "99.9999" : 18.288234475902076,
+                "100.0" : 18.288234475902076
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    17.65127111636149,
+                    17.591909409958323,
+                    17.58414908299167,
+                    17.538115689756218,
+                    17.644824720725804
+                ],
+                [
+                    17.518157632627386,
+                    18.288234475902076,
+                    17.59899865707013,
+                    17.513546176354982,
+                    17.48926677366456
+                ],
+                [
+                    17.51703896285669,
+                    17.482148041258686,
+                    17.517979234456458,
+                    17.569226842967677,
+                    17.50613973143346
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.compile",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "jni",
+            "size" : "large"
+        },
+        "primaryMetric" : {
+            "score" : 198.12305938048505,
+            "scoreError" : 2.14933711631589,
+            "scoreConfidence" : [
+                195.97372226416917,
+                200.27239649680092
+            ],
+            "scorePercentiles" : {
+                "0.0" : 196.4385561329542,
+                "50.0" : 197.39538629651506,
+                "90.0" : 201.60294426373676,
+                "95.0" : 204.6873296894156,
+                "99.0" : 204.6873296894156,
+                "99.9" : 204.6873296894156,
+                "99.99" : 204.6873296894156,
+                "99.999" : 204.6873296894156,
+                "99.9999" : 204.6873296894156,
+                "100.0" : 204.6873296894156
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    198.87495457250546,
+                    199.5466873132842,
+                    197.58831832068591,
+                    198.02210177210176,
+                    198.86518555985322
+                ],
+                [
+                    197.39538629651506,
+                    204.6873296894156,
+                    197.94867964811704,
+                    196.84490555664638,
+                    197.22114025769648
+                ],
+                [
+                    197.27428502558047,
+                    196.4385561329542,
+                    197.10249473165928,
+                    197.0930025555337,
+                    196.94286327472744
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.eval",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "wasm",
+            "size" : "noop"
+        },
+        "primaryMetric" : {
+            "score" : 295.4500085316242,
+            "scoreError" : 9.092110351527154,
+            "scoreConfidence" : [
+                286.35789818009704,
+                304.5421188831513
+            ],
+            "scorePercentiles" : {
+                "0.0" : 283.76300240588733,
+                "50.0" : 295.9068896103896,
+                "90.0" : 306.14725678145487,
+                "95.0" : 308.0446757836509,
+                "99.0" : 308.0446757836509,
+                "99.9" : 308.0446757836509,
+                "99.99" : 308.0446757836509,
+                "99.999" : 308.0446757836509,
+                "99.9999" : 308.0446757836509,
+                "100.0" : 308.0446757836509
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    292.094809190372,
+                    303.27363644619345,
+                    295.7410563920874,
+                    297.05603096296295,
+                    295.9068896103896
+                ],
+                [
+                    302.5849382175227,
+                    300.8832570612981,
+                    304.88231077999086,
+                    304.66378541033436,
+                    308.0446757836509
+                ],
+                [
+                    283.98174755214984,
+                    287.99257997698504,
+                    285.061563850967,
+                    283.76300240588733,
+                    285.8198443335709
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.eval",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "wasm",
+            "size" : "small"
+        },
+        "primaryMetric" : {
+            "score" : 432.8573635259971,
+            "scoreError" : 13.785123229247484,
+            "scoreConfidence" : [
+                419.0722402967496,
+                446.64248675524453
+            ],
+            "scorePercentiles" : {
+                "0.0" : 421.30283505154637,
+                "50.0" : 426.1007793836344,
+                "90.0" : 460.21599178271356,
+                "95.0" : 461.00162827586206,
+                "99.0" : 461.00162827586206,
+                "99.9" : 461.00162827586206,
+                "99.99" : 461.00162827586206,
+                "99.999" : 461.00162827586206,
+                "99.9999" : 461.00162827586206,
+                "100.0" : 461.00162827586206
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    461.00162827586206,
+                    437.8986195367133,
+                    436.43545929473225,
+                    436.2978677110531,
+                    440.35512763620386
+                ],
+                [
+                    432.90199935093034,
+                    459.69223412061456,
+                    426.1007793836344,
+                    421.30283505154637,
+                    424.31904686174727
+                ],
+                [
+                    423.74991205073997,
+                    423.80422316145393,
+                    422.4660633178556,
+                    422.80419397006114,
+                    423.7304631668078
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.eval",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "wasm",
+            "size" : "large"
+        },
+        "primaryMetric" : {
+            "score" : 2271.892131263909,
+            "scoreError" : 40.0286147640235,
+            "scoreConfidence" : [
+                2231.8635164998855,
+                2311.9207460279326
+            ],
+            "scorePercentiles" : {
+                "0.0" : 2206.2021452145214,
+                "50.0" : 2274.5125192743762,
+                "90.0" : 2315.6003752886836,
+                "95.0" : 2316.0131351039263,
+                "99.0" : 2316.0131351039263,
+                "99.9" : 2316.0131351039263,
+                "99.99" : 2316.0131351039263,
+                "99.999" : 2316.0131351039263,
+                "99.9999" : 2316.0131351039263,
+                "100.0" : 2316.0131351039263
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    2312.1350806451615,
+                    2312.7226066897347,
+                    2316.0131351039263,
+                    2315.325202078522,
+                    2299.6429126436783
+                ],
+                [
+                    2206.2021452145214,
+                    2220.1373337028826,
+                    2216.38453038674,
+                    2274.5125192743762,
+                    2236.4164810267857
+                ],
+                [
+                    2274.1080408163266,
+                    2284.914335616438,
+                    2281.8306313993176,
+                    2264.325291196388,
+                    2263.7117231638417
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.eval",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "jni",
+            "size" : "noop"
+        },
+        "primaryMetric" : {
+            "score" : 57.54711481078717,
+            "scoreError" : 2.419785970903886,
+            "scoreConfidence" : [
+                55.12732883988328,
+                59.96690078169106
+            ],
+            "scorePercentiles" : {
+                "0.0" : 55.19770246386786,
+                "50.0" : 56.75966828964502,
+                "90.0" : 61.9641921863904,
+                "95.0" : 63.59138172418168,
+                "99.0" : 63.59138172418168,
+                "99.9" : 63.59138172418168,
+                "99.99" : 63.59138172418168,
+                "99.999" : 63.59138172418168,
+                "99.9999" : 63.59138172418168,
+                "100.0" : 63.59138172418168
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    57.64224283455513,
+                    55.9711951818664,
+                    55.63116294878198,
+                    56.72853068326496,
+                    60.879399161196204
+                ],
+                [
+                    57.972819628416566,
+                    63.59138172418168,
+                    57.787446782142545,
+                    57.60054805314315,
+                    59.323589276726764
+                ],
+                [
+                    56.75966828964502,
+                    55.19770246386786,
+                    56.2964056107375,
+                    56.54807167033339,
+                    55.27655785294847
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.eval",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "jni",
+            "size" : "small"
+        },
+        "primaryMetric" : {
+            "score" : 74.26891712486584,
+            "scoreError" : 1.6372475164370386,
+            "scoreConfidence" : [
+                72.6316696084288,
+                75.90616464130288
+            ],
+            "scorePercentiles" : {
+                "0.0" : 72.52410898108293,
+                "50.0" : 73.4869769470405,
+                "90.0" : 76.49931085796105,
+                "95.0" : 76.63049592469292,
+                "99.0" : 76.63049592469292,
+                "99.9" : 76.63049592469292,
+                "99.99" : 76.63049592469292,
+                "99.999" : 76.63049592469292,
+                "99.9999" : 76.63049592469292,
+                "100.0" : 76.63049592469292
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    73.08263321912816,
+                    73.30776280431996,
+                    75.91389656608489,
+                    72.7446864274571,
+                    75.59894651760085
+                ],
+                [
+                    73.02551109006811,
+                    75.73942842547395,
+                    72.91289847272728,
+                    72.52410898108293,
+                    76.41185414680648
+                ],
+                [
+                    73.08896404609102,
+                    75.8814619285498,
+                    73.4869769470405,
+                    73.68413137586359,
+                    76.63049592469292
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.eval",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "jni",
+            "size" : "large"
+        },
+        "primaryMetric" : {
+            "score" : 250.1630571083752,
+            "scoreError" : 6.844600009027904,
+            "scoreConfidence" : [
+                243.31845709934728,
+                257.0076571174031
+            ],
+            "scorePercentiles" : {
+                "0.0" : 242.07564686707715,
+                "50.0" : 248.94049471064093,
+                "90.0" : 262.24924657046796,
+                "95.0" : 265.3881737691901,
+                "99.0" : 265.3881737691901,
+                "99.9" : 265.3881737691901,
+                "99.99" : 265.3881737691901,
+                "99.999" : 265.3881737691901,
+                "99.9999" : 265.3881737691901,
+                "100.0" : 265.3881737691901
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    249.0091658579072,
+                    244.66031698389457,
+                    248.0007214594929,
+                    242.07564686707715,
+                    248.1940434890348
+                ],
+                [
+                    249.34197561279083,
+                    246.492603147283,
+                    248.94049471064093,
+                    242.95564243305463,
+                    246.24013005531654
+                ],
+                [
+                    265.3881737691901,
+                    250.30775593008738,
+                    255.3940208890587,
+                    260.1566284379865,
+                    255.2885369828135
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.evalCompiled",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "wasm",
+            "size" : "noop"
+        },
+        "primaryMetric" : {
+            "score" : 285.76420157171367,
+            "scoreError" : 8.749727777996135,
+            "scoreConfidence" : [
+                277.0144737937175,
+                294.5139293497098
+            ],
+            "scorePercentiles" : {
+                "0.0" : 275.6755224085785,
+                "50.0" : 288.3586081820801,
+                "90.0" : 296.06492453763434,
+                "95.0" : 304.06488853503186,
+                "99.0" : 304.06488853503186,
+                "99.9" : 304.06488853503186,
+                "99.99" : 304.06488853503186,
+                "99.999" : 304.06488853503186,
+                "99.9999" : 304.06488853503186,
+                "100.0" : 304.06488853503186
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    289.81883564814814,
+                    290.731615206036,
+                    289.3129124403988,
+                    287.9197838885698,
+                    304.06488853503186
+                ],
+                [
+                    288.13499310245726,
+                    288.6810546897547,
+                    288.3586081820801,
+                    289.6697456254519,
+                    290.31915642215137
+                ],
+                [
+                    276.27179831816926,
+                    275.8120759284732,
+                    275.87036472532014,
+                    275.6755224085785,
+                    275.8216684550832
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.evalCompiled",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "wasm",
+            "size" : "small"
+        },
+        "primaryMetric" : {
+            "score" : 360.69941258505213,
+            "scoreError" : 11.391041125130302,
+            "scoreConfidence" : [
+                349.30837145992183,
+                372.09045371018243
+            ],
+            "scorePercentiles" : {
+                "0.0" : 343.41136363636366,
+                "50.0" : 365.0044070635354,
+                "90.0" : 371.5767579916842,
+                "95.0" : 375.06458144329895,
+                "99.0" : 375.06458144329895,
+                "99.9" : 375.06458144329895,
+                "99.99" : 375.06458144329895,
+                "99.999" : 375.06458144329895,
+                "99.9999" : 375.06458144329895,
+                "100.0" : 375.06458144329895
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    368.85548205411374,
+                    366.471338998538,
+                    367.0294784916712,
+                    369.2515423572744,
+                    365.0044070635354
+                ],
+                [
+                    343.41136363636366,
+                    343.6414166238218,
+                    346.85245706371194,
+                    360.07338302463586,
+                    344.2585626827171
+                ],
+                [
+                    363.55714998186437,
+                    365.25638802701224,
+                    375.06458144329895,
+                    368.76235277880016,
+                    363.0012845484222
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.evalCompiled",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "wasm",
+            "size" : "large"
+        },
+        "primaryMetric" : {
+            "score" : 614.401835321554,
+            "scoreError" : 13.022258000953144,
+            "scoreConfidence" : [
+                601.3795773206009,
+                627.4240933225071
+            ],
+            "scorePercentiles" : {
+                "0.0" : 605.3766856884058,
+                "50.0" : 606.6650766202301,
+                "90.0" : 638.1568865885466,
+                "95.0" : 645.0496809263428,
+                "99.0" : 645.0496809263428,
+                "99.9" : 645.0496809263428,
+                "99.99" : 645.0496809263428,
+                "99.999" : 645.0496809263428,
+                "99.9999" : 645.0496809263428,
+                "100.0" : 645.0496809263428
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    633.5616903633492,
+                    645.0496809263428,
+                    620.3194918032787,
+                    622.2671657870227,
+                    623.6727467330429
+                ],
+                [
+                    609.7779805352798,
+                    606.6112796122387,
+                    606.6650766202301,
+                    605.588193714113,
+                    605.8557681598063
+                ],
+                [
+                    605.5065960725076,
+                    605.3766856884058,
+                    606.3844496522528,
+                    613.3187087289433,
+                    606.0720154264973
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.evalCompiled",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "jni",
+            "size" : "noop"
+        },
+        "primaryMetric" : {
+            "score" : 56.99166963965352,
+            "scoreError" : 1.203238990398564,
+            "scoreConfidence" : [
+                55.788430649254956,
+                58.19490863005209
+            ],
+            "scorePercentiles" : {
+                "0.0" : 55.63311228878222,
+                "50.0" : 56.81419698902781,
+                "90.0" : 59.16685940027714,
+                "95.0" : 60.004497964315654,
+                "99.0" : 60.004497964315654,
+                "99.9" : 60.004497964315654,
+                "99.99" : 60.004497964315654,
+                "99.999" : 60.004497964315654,
+                "99.9999" : 60.004497964315654,
+                "100.0" : 60.004497964315654
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    56.389051666338,
+                    55.63311228878222,
+                    56.83506357889963,
+                    60.004497964315654,
+                    58.608433690918126
+                ],
+                [
+                    57.52684715643212,
+                    57.39189634898328,
+                    56.27164254041311,
+                    56.88202294672271,
+                    56.81419698902781
+                ],
+                [
+                    56.783781757293674,
+                    57.28406979071363,
+                    56.69945635268501,
+                    56.094609923322324,
+                    55.65636159995559
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.evalCompiled",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "jni",
+            "size" : "small"
+        },
+        "primaryMetric" : {
+            "score" : 66.54824374319094,
+            "scoreError" : 1.8523315621308936,
+            "scoreConfidence" : [
+                64.69591218106004,
+                68.40057530532184
+            ],
+            "scorePercentiles" : {
+                "0.0" : 63.92413096983996,
+                "50.0" : 66.05611605670953,
+                "90.0" : 68.9934100379972,
+                "95.0" : 69.83548705151473,
+                "99.0" : 69.83548705151473,
+                "99.9" : 69.83548705151473,
+                "99.99" : 69.83548705151473,
+                "99.999" : 69.83548705151473,
+                "99.9999" : 69.83548705151473,
+                "100.0" : 69.83548705151473
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    68.43202536231884,
+                    65.45066531533004,
+                    68.07797809151216,
+                    65.1543272455479,
+                    66.49325453759724
+                ],
+                [
+                    69.83548705151473,
+                    66.05611605670953,
+                    68.38647559227145,
+                    65.74139178333716,
+                    65.52505046667758
+                ],
+                [
+                    63.92413096983996,
+                    64.74887370258998,
+                    67.4471023277718,
+                    64.75445035850397,
+                    68.19632728634151
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "membench.CompileBench.evalCompiled",
+        "mode" : "avgt",
+        "threads" : 1,
+        "forks" : 3,
+        "jvm" : "/Users/gbarnett/.sdkman/candidates/java/25.0.4-zulu/bin/java",
+        "jvmArgs" : [
+            "--enable-native-access=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        ],
+        "jdkVersion" : "25.0.4",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "25.0.4+7-LTS",
+        "warmupIterations" : 5,
+        "warmupTime" : "2 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 5,
+        "measurementTime" : "2 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "backend" : "jni",
+            "size" : "large"
+        },
+        "primaryMetric" : {
+            "score" : 103.13509715943606,
+            "scoreError" : 2.8650685823185373,
+            "scoreConfidence" : [
+                100.27002857711751,
+                106.0001657417546
+            ],
+            "scorePercentiles" : {
+                "0.0" : 100.15227255920855,
+                "50.0" : 102.20310663737162,
+                "90.0" : 107.00124646826266,
+                "95.0" : 107.15789685089975,
+                "99.0" : 107.15789685089975,
+                "99.9" : 107.15789685089975,
+                "99.99" : 107.15789685089975,
+                "99.999" : 107.15789685089975,
+                "99.9999" : 107.15789685089975,
+                "100.0" : 107.15789685089975
+            },
+            "scoreUnit" : "us/op",
+            "rawData" : [
+                [
+                    100.49134425900867,
+                    102.20310663737162,
+                    106.38998427938384,
+                    101.71691606117575,
+                    102.82544093195115
+                ],
+                [
+                    100.63943610720739,
+                    100.31964849548646,
+                    107.15789685089975,
+                    106.27937479428783,
+                    104.16982375578553
+                ],
+                [
+                    101.93329815907242,
+                    100.26865909545728,
+                    105.58244252540678,
+                    100.15227255920855,
+                    106.89681287983794
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    }
+]
+
+

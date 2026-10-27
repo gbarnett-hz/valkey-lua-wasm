@@ -536,3 +536,39 @@ int luaEvalReply(lua_State *lua, int kind, respBuf *out) {
     }
     return 0;
 }
+
+/* ---------------------------------------------------------------------------------------------------------------
+ * Compiling a script once for many evals, as Valkey keeps EVAL and SCRIPT LOAD scripts compiled by SHA1
+ * ------------------------------------------------------------------------------------------------------------- */
+
+static int dumpWriter(lua_State *lua, const void *p, size_t len, void *out) {
+    (void)lua;
+    addReplyProto(out, p, len);
+    return 0;
+}
+
+/* Stack: function, out. */
+static int protectedDump(lua_State *lua) {
+    respBuf *out = lua_touserdata(lua, 2);
+    lua_pop(lua, 1);
+    lua_dump(lua, dumpWriter, out);
+    return 0;
+}
+
+int luaCompileScript(const char *src, size_t len, respBuf *out) {
+    lua_State *lua = luaL_newstate();
+    int status;
+    if (lua == NULL) return -1;
+    out->L = lua;
+    if (luaL_loadbuffer(lua, src, len, "@user_script")) {
+        status = luaEvalReply(lua, EVAL_COMPILE, out) ? -1 : 1;
+    } else {
+        lua_pushcfunction(lua, protectedDump);
+        lua_insert(lua, -2);
+        lua_pushlightuserdata(lua, out);
+        status = lua_pcall(lua, 2, 0, 0) ? -1 : 0;
+    }
+    lua_close(lua);
+    out->L = NULL;
+    return status;
+}

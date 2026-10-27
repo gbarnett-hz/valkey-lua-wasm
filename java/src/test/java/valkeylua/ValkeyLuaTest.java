@@ -798,4 +798,34 @@ abstract class ValkeyLuaTest {
         assertEquals(new ValkeyLua.Result(true, "$2\r\n\u00e9\r\n".getBytes(UTF_8)), vl.eval("redis.call('SET', 'k', ARGV[1]); return redis.call('GET', 'k')",
                 List.of(), List.of("\u00e9".getBytes(UTF_8))));
     }
+
+    @Test
+    void compiledScriptRepliesAsItsSource() {
+        var keys = List.of("k".getBytes(UTF_8));
+        var args = List.of("a\0b".getBytes(ISO_8859_1));
+        var other = create(args1 -> "+OK\r\n".getBytes(UTF_8));
+        for (String s : List.of(
+                "return {KEYS[1], ARGV[1], 'x\\0y', 0.1 + 2^53, redis.call('PING')}",
+                "local x = 1\nlocal function f() x = x + 1 return x end\nreturn f() + f()",
+                "local function f()\n  error('boom')\nend\nreturn f()",
+                "return redis.call('nosuch', {})",
+                "return {err = 'custom'}",
+                "return debug")) {
+            var c = lua.compile(s);
+            assertEquals(null, c.error(), s);
+            var expected = lua.eval(s, keys, args);
+            assertEquals(expected, lua.eval(c, keys, args), s);
+            assertEquals(expected, lua.eval(c, keys, args), s);
+            assertEquals(expected, other.eval(c, keys, args), s);
+        }
+    }
+
+    @Test
+    void compileErrorIsEvalsReply() {
+        var c = lua.compile("return +");
+        assertTrue(calls.isEmpty());
+        var expected = lua.eval("return +");
+        assertEquals(result(false, new String(c.error(), ISO_8859_1)), expected);
+        assertEquals(expected, lua.eval(c, List.of(), List.of()));
+    }
 }

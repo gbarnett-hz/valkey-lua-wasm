@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -64,6 +65,11 @@ public final class JniValkeyLua extends ValkeyLua {
 
     /** Consumes the top of the stack; null if the conversion raised. */
     private static native byte[] evalReply(long L, int kind);
+
+    /** The bytecode, or (starting with '-') EVAL's compile error reply. */
+    private static native byte[] compileScript(byte[] src);
+
+    private static native int loadCompiled(long L, byte[] bytecode);
 
     // Lua's C code recurses on the native stack of the thread running it, and overflowing that kills the JVM. Evals
     // run on these threads with Valkey's 8 MiB (its main thread's default), so Valkey's own nesting limits fire first
@@ -511,10 +517,21 @@ public final class JniValkeyLua extends ValkeyLua {
     }
 
     /** Runs a script in a fresh state, as the Wasm variant does, and returns Valkey's RESP2 reply. */
-    /** Runs the eval on a Valkey-sized stack and waits for it, even if interrupted: the instance isn't thread-safe. */
     @Override
-    Result evalUnchecked(String script, byte[] kv) {
-        Future<Result> f = LUA_THREADS.submit(() -> evalOnLuaThread(script, kv));
+    Result evalUnchecked(Script script, byte[] kv) {
+        return onLuaThread(() -> evalOnLuaThread(script, kv));
+    }
+
+    /** The parser recurses on the native stack too. */
+    @Override
+    Script compileUnchecked(String script) {
+        byte[] out = onLuaThread(() -> compileScript(script.getBytes(StandardCharsets.UTF_8)));
+        return out[0] == '-' ? new Script(null, null, script, out) : new Script(JniValkeyLua.class, out, null, null);
+    }
+
+    /** Runs task on a Valkey-sized stack and waits for it, even if interrupted: the instance isn't thread-safe. */
+    private static <T> T onLuaThread(Callable<T> task) {
+        Future<T> f = LUA_THREADS.submit(task);
         boolean interrupted = false;
         try {
             while (true) {
@@ -535,11 +552,11 @@ public final class JniValkeyLua extends ValkeyLua {
 
     /** Nothing can stop native Lua short of ending the process (README "No script timeout"). */
     @Override
-    Result eval(String script, byte[] kv, Duration timeout) {
+    Result eval(Script script, byte[] kv, Duration timeout) {
         throw new UnsupportedOperationException("JniValkeyLua cannot stop a running script; use WasmValkeyLua");
     }
 
-    private Result evalOnLuaThread(String script, byte[] kv) {
+    private Result evalOnLuaThread(Script script, byte[] kv) {
         var lua = new Lua51();
         try {
             long L = lua.getPointer();
@@ -602,12 +619,11 @@ public final class JniValkeyLua extends ValkeyLua {
             installErrorHandler(L);
             lockGlobals(L);
 
-            byte[] src = script.getBytes(StandardCharsets.UTF_8);
             int kind = EVAL_SETUP;
             C.luaJ_pushfunction(L, (JFunction) this::resetHostState);
             if (C.lua_pcall(L, 0, 0, 0) == 0 && setKeysArgv(L, kv) == 0) {
                 kind = EVAL_COMPILE;
-                if (C.luaJ_loadbuffer(L, ByteBuffer.allocateDirect(src.length).put(src), src.length, "@user_script") == 0) {
+                if (load(L, script) == 0) {
                     pushErrorHandler(L);
                     C.lua_insert(L, -2);
                     kind = C.lua_pcall(L, 0, 1, -2) != 0 ? EVAL_RUN : EVAL_OK;
@@ -621,6 +637,12 @@ public final class JniValkeyLua extends ValkeyLua {
         } finally {
             lua.close();
         }
+    }
+
+    private static int load(long L, Script script) {
+        if (script.bytecode != null) return loadCompiled(L, script.bytecode);
+        byte[] src = script.source.getBytes(StandardCharsets.UTF_8);
+        return C.luaJ_loadbuffer(L, ByteBuffer.allocateDirect(src.length).put(src), src.length, "@user_script");
     }
 
     /* ---------------------------------------------------------------------------------------------------------

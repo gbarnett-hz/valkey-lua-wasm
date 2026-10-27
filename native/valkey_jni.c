@@ -84,3 +84,30 @@ JNIEXPORT jbyteArray JNICALL Java_valkeylua_JniValkeyLua_evalReply(JNIEnv *env, 
     free(out.buf);
     return a;
 }
+
+/* luaCompileScript: the bytecode, which starts with LUA_SIGNATURE ("\033Lua"), or EVAL's compile error reply, which
+ * starts with '-'. Null, with OutOfMemoryError pending, if compiling ran out of memory. */
+JNIEXPORT jbyteArray JNICALL Java_valkeylua_JniValkeyLua_compileScript(JNIEnv *env, jclass cls, jbyteArray src) {
+    jsize n = (*env)->GetArrayLength(env, src);
+    jbyte *b = (*env)->GetByteArrayElements(env, src, NULL);
+    respBuf out = {0};
+    int status = luaCompileScript((const char *)b, n, &out);
+    (*env)->ReleaseByteArrayElements(env, src, b, JNI_ABORT);
+    jbyteArray a = NULL;
+    if (status < 0) {
+        (*env)->ThrowNew(env, (*env)->FindClass(env, "java/lang/OutOfMemoryError"), "compiling the script");
+    } else if ((a = (*env)->NewByteArray(env, (jsize)out.len)) != NULL) {
+        (*env)->SetByteArrayRegion(env, a, 0, (jsize)out.len, (const jbyte *)out.buf);
+    }
+    free(out.buf);
+    return a;
+}
+
+/* luaLoadCompiled (lua/valkey_undump.c). */
+JNIEXPORT jint JNICALL Java_valkeylua_JniValkeyLua_loadCompiled(JNIEnv *env, jclass cls, jlong L, jbyteArray bc) {
+    jsize n = (*env)->GetArrayLength(env, bc);
+    jbyte *b = (*env)->GetByteArrayElements(env, bc, NULL);
+    int status = luaLoadCompiled((lua_State *)L, (const char *)b, n);
+    (*env)->ReleaseByteArrayElements(env, bc, b, JNI_ABORT);
+    return status;
+}

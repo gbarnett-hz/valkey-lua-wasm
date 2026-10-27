@@ -48,6 +48,35 @@ public abstract sealed class ValkeyLua permits WasmValkeyLua, JniValkeyLua {
         }
     }
 
+    /**
+     * A script compiled once by {@link #compile} for evals on any instance of the backend that compiled it, as Valkey
+     * keeps EVAL and SCRIPT LOAD scripts compiled by SHA1 (the caller keeps the SHA1 map). An eval of it replies as an
+     * eval of its source would. Immutable, so instances on any thread can share it.
+     */
+    public static final class Script {
+        // The backend whose bytecode this is; null if not compiled.
+        final Class<? extends ValkeyLua> backend;
+        // Exactly one is set: bytecode (Lua's dump, for that backend's build only) or source.
+        final byte[] bytecode;
+        final String source;
+        private final byte[] error;
+
+        Script(Class<? extends ValkeyLua> backend, byte[] bytecode, String source, byte[] error) {
+            this.backend = backend;
+            this.bytecode = bytecode;
+            this.source = source;
+            this.error = error;
+        }
+
+        /**
+         * Null if the script compiled; else the RESP2 error Valkey's SCRIPT LOAD replies, as an eval's reply ends up
+         * (the eval compiles the source again, so its setup's handler calls still happen first).
+         */
+        public byte[] error() {
+            return error == null ? null : error.clone();
+        }
+    }
+
     // Set once anything escapes eval; the backend's state can no longer be trusted.
     private boolean poisoned;
 
@@ -74,7 +103,32 @@ public abstract sealed class ValkeyLua permits WasmValkeyLua, JniValkeyLua {
     }
 
     public Result eval(String script, List<byte[]> keys, List<byte[]> args, Duration timeout) {
+        return eval(source(script), kv(keys, args), timeout);
+    }
+
+    /** Compiles a script for {@link #eval(Script, List, List)} on instances of this backend. */
+    public Script compile(String script) {
+        checkUsable();
+        try {
+            return compileUnchecked(script);
+        } catch (Throwable e) {
+            poisoned = true;
+            throw e;
+        }
+    }
+
+    /** Throws IllegalArgumentException if another backend compiled script. */
+    public Result eval(Script script, List<byte[]> keys, List<byte[]> args) {
+        return eval(script, kv(keys, args));
+    }
+
+    /** As {@link #eval(String, List, List, Duration)}. */
+    public Result eval(Script script, List<byte[]> keys, List<byte[]> args, Duration timeout) {
         return eval(script, kv(keys, args), timeout);
+    }
+
+    private static Script source(String script) {
+        return new Script(null, null, script, null);
     }
 
     private static byte[] kv(List<byte[]> keys, List<byte[]> args) {
@@ -99,6 +153,13 @@ public abstract sealed class ValkeyLua permits WasmValkeyLua, JniValkeyLua {
 
     /** Package-private seam so tests can pass a raw (possibly malformed) KEYS/ARGV buffer. */
     Result eval(String script, byte[] kv) {
+        return eval(source(script), kv);
+    }
+
+    Result eval(Script script, byte[] kv) {
+        if (script.bytecode != null && script.backend != getClass()) {
+            throw new IllegalArgumentException("script compiled by " + script.backend.getSimpleName());
+        }
         checkUsable();
         try {
             return evalUnchecked(script, kv);
@@ -120,7 +181,9 @@ public abstract sealed class ValkeyLua permits WasmValkeyLua, JniValkeyLua {
     }
 
     /** kv is the RESP2 reply *2 [keys array, args array]. */
-    abstract Result evalUnchecked(String script, byte[] kv);
+    abstract Result evalUnchecked(Script script, byte[] kv);
 
-    abstract Result eval(String script, byte[] kv, Duration timeout);
+    abstract Result eval(Script script, byte[] kv, Duration timeout);
+
+    abstract Script compileUnchecked(String script);
 }
