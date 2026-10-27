@@ -347,4 +347,11 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
         }
         watchdog.shutdown();
     }
+
+    @Test
+    void scriptCompiledByOtherBackendIsRejected() {
+        var c = new JniValkeyLua(args -> NULL.getBytes(UTF_8)).compile("return 1");
+        assertThrows(IllegalArgumentException.class, () -> lua.eval(c, List.of(), List.of()));
+        assertEquals(result(true, integer(1)), lua.eval("return 1"));
+    }
 }

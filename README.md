@@ -48,7 +48,8 @@ skill's source and content hash, not a commit, so a restore fetches upstream's c
   (`-mllvm -wasm-enable-sjlj -lsetjmp -mllvm -wasm-use-legacy-eh=false`). Chicory rejects the legacy EH opcodes, so the last flag is required.
 - Runs on Chicory's runtime compiler (`lua.wasm` → JVM bytecode), not the default interpreter. It parses and compiles
   once per JVM, when the first `WasmValkeyLua` is created; every instance shares the module and generated classes.
-- The module exports `eval(src_ptr, src_len, kv_ptr, kv_len) -> status` and `result_ptr`/`result_len`.
+- The module exports `eval(src_ptr, src_len, kv_ptr, kv_len, compiled) -> status`, `compile(src_ptr, src_len) -> status`
+  and `result_ptr`/`result_len`.
 - 64-bit integers, as on Valkey: `-DLUA_USELONGLONG`, `-DSTRUCT_INT='long long'` and six patches in `lua/patches/`
   (`luaconf.h`, `lua_struct.c`, `lbaselib.c`, `lstrlib.c`, `lua_cmsgpack.c`, `lapi.c`), applied with `patch -F 0` so one that
   no longer applies exactly fails the build. What each fixes is in [gaps.md](gaps.md).
@@ -212,6 +213,29 @@ var vl = new JniValkeyLua(handler);   // or new WasmValkeyLua(handler)
 var r = vl.eval("redis.call('SET', KEYS[1], ARGV[1]); return redis.call('GET', KEYS[1])",
         List.of("k".getBytes()), List.of("v".getBytes()));   // Result[ok=true, reply=$1\r\nv\r\n]
 ```
+
+## Compiled scripts (EVALSHA, SCRIPT LOAD)
+
+Valkey compiles a script once and keeps it by SHA1 for later `EVAL`/`EVALSHA` calls. `compile(script)` does the same
+here: it returns an immutable `ValkeyLua.Script` that every instance of the same backend can run on any thread with
+`eval(script, keys, args[, timeout])`. Keeping the SHA1 → `Script` map is up to the caller.
+
+- An eval of a `Script` replies byte for byte as an eval of its source, error positions included.
+- `Script.error()` is `null` if the script compiled. Otherwise it is the reply Valkey's `SCRIPT LOAD` gives, e.g.
+  `-ERR Error compiling script (new function): user_script:1: ...`. An eval of a `Script` that failed to compile
+  compiles the source again and fails the same way.
+- A `Script` holds Lua bytecode (`lua_dump`) for its backend's build only; passing it to the other backend throws
+  `IllegalArgumentException`. Valkey's Lua can't load bytecode (it removed that path from `lua_load` so scripts can't
+  run crafted bytecode), so `lua/valkey_undump.c` loads it with `luaU_undump` directly. Only `compile` can produce
+  that bytecode, and nothing a script controls reaches the loader.
+- Each eval still runs in a fresh `lua_State`, so this saves the parse but not the per-eval setup. JMH
+  (`bench/.../CompileBench.java`, arm64 Mac, µs per eval from source → compiled; raw data in
+  `bench/results/compile-{before,after}.json`):
+
+  | | setup only (`return 1`) | 0.5 KB rate limiter | 16 KB (BullMQ-sized) |
+  |---|---|---|---|
+  | Wasm | 295 → 286 | 433 → 361 | 2272 → 614 |
+  | JNI | 58 → 57 | 74 → 67 | 250 → 103 |
 
 ## Script reply
 

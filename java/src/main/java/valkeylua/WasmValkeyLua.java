@@ -137,7 +137,7 @@ public final class WasmValkeyLua extends ValkeyLua {
     }
 
     @Override
-    Result evalUnchecked(String script, byte[] kv) {
+    Result evalUnchecked(Script script, byte[] kv) {
         try {
             return run(script, kv);
         } catch (RuntimeException e) {
@@ -149,8 +149,9 @@ public final class WasmValkeyLua extends ValkeyLua {
         }
     }
 
-    private Result run(String script, byte[] kv) {
-        byte[] src = script.getBytes(StandardCharsets.UTF_8);
+    private Result run(Script script, byte[] kv) {
+        boolean compiled = script.bytecode != null;
+        byte[] src = compiled ? script.bytecode : script.source.getBytes(StandardCharsets.UTF_8);
         int ptr = (int) instance.export("alloc").apply(src.length)[0];
         int kvPtr = (int) instance.export("alloc").apply(kv.length)[0];
         Result result;
@@ -160,7 +161,7 @@ public final class WasmValkeyLua extends ValkeyLua {
             if (deadline != null) deadline.enterLua();
             int status;
             try {
-                status = (int) instance.export("eval").apply(ptr, src.length, kvPtr, kv.length)[0];
+                status = (int) instance.export("eval").apply(ptr, src.length, kvPtr, kv.length, compiled ? 1 : 0)[0];
             } finally {
                 // A script that finished keeps its result even if the deadline passed as it returned.
                 if (deadline != null) deadline.finish();
@@ -178,7 +179,26 @@ public final class WasmValkeyLua extends ValkeyLua {
     }
 
     @Override
-    Result eval(String script, byte[] kv, Duration timeout) {
+    Script compileUnchecked(String script) {
+        byte[] src = script.getBytes(StandardCharsets.UTF_8);
+        int ptr = (int) instance.export("alloc").apply(src.length)[0];
+        int status;
+        byte[] out;
+        try {
+            instance.memory().write(ptr, src);
+            status = (int) instance.export("compile").apply(ptr, src.length)[0];
+            if (status < 0) throw new OutOfMemoryError("compiling the script");
+            out = instance.memory().readBytes((int) instance.export("result_ptr").apply()[0],
+                    (int) instance.export("result_len").apply()[0]);
+        } finally {
+            instance.export("dealloc").apply(ptr);
+        }
+        if (memoryBytes() > maxRetainedBytes) rebuild();
+        return status == 0 ? new Script(WasmValkeyLua.class, out, null, null) : new Script(null, null, script, out);
+    }
+
+    @Override
+    Result eval(Script script, byte[] kv, Duration timeout) {
         checkUsable();
         var d = new Deadline(timeout);
         var check = watchdog.schedule(d::expire, timeout.toNanos(), TimeUnit.NANOSECONDS);

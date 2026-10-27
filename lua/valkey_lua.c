@@ -809,9 +809,22 @@ static int setKeysArgv(lua_State *L, const char *kv, size_t kv_len) {
     return 0;
 }
 
-/* Runs a script in a fresh state and leaves Valkey's RESP2 reply in result_ptr/result_len until the next call.
- * Returns 0 if the script ran, 1 if it failed (the reply is an error), -1 if converting the reply raised. */
-__attribute__((export_name("eval"))) int eval(const char *src, size_t len, const char *kv, size_t kv_len) {
+/* Leaves the script's bytecode (returns 0) or EVAL's compile error reply (returns 1) in result_ptr/result_len until
+ * the next call; returns -1 if out of memory. */
+__attribute__((export_name("compile"))) int compile(const char *src, size_t len) {
+    respBuf out = {0};
+    int status = luaCompileScript(src, len, &out);
+    free(result);
+    result = out.buf;
+    result_size = out.len;
+    return status;
+}
+
+/* Runs a script (src is compile's bytecode if compiled) in a fresh state and leaves Valkey's RESP2 reply in
+ * result_ptr/result_len until the next call. Returns 0 if the script ran, 1 if it failed (the reply is an error), -1
+ * if converting the reply raised. */
+__attribute__((export_name("eval"))) int eval(const char *src, size_t len, const char *kv, size_t kv_len,
+                                              int compiled) {
     lua_State *L = luaL_newstate();
     loadLib(L, "", luaopen_base);
     loadLib(L, LUA_TABLIBNAME, luaopen_table);
@@ -876,7 +889,7 @@ __attribute__((export_name("eval"))) int eval(const char *src, size_t len, const
     lua_pushcfunction(L, resetHostState);
     if (!lua_pcall(L, 0, 0, 0) && !setKeysArgv(L, kv, kv_len)) {
         kind = EVAL_COMPILE;
-        if (!luaL_loadbuffer(L, src, len, "@user_script")) {
+        if (!(compiled ? luaLoadCompiled(L, src, len) : luaL_loadbuffer(L, src, len, "@user_script"))) {
             luaPushErrorHandler(L);
             lua_insert(L, -2);
             kind = lua_pcall(L, 0, 1, -2) ? EVAL_RUN : EVAL_OK;
