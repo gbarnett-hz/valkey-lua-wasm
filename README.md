@@ -229,13 +229,27 @@ here: it returns an immutable `ValkeyLua.Script` that every instance of the same
   run crafted bytecode), so `lua/valkey_undump.c` loads it with `luaU_undump` directly. Only `compile` can produce
   that bytecode, and nothing a script controls reaches the loader.
 - Each eval still runs in a fresh `lua_State`, so this saves the parse but not the per-eval setup. JMH
-  (`bench/.../CompileBench.java`, arm64 Mac, µs per eval from source → compiled; raw data in
-  `bench/results/compile-{before,after}.json`):
+  (`CompileBench`, arm64 Mac, µs per op; raw data in `bench/results/compile-{before,after}.json`, no GC profiler):
 
   | | setup only (`return 1`) | 0.5 KB rate limiter | 16 KB (BullMQ-sized) |
   |---|---|---|---|
-  | Wasm | 295 → 286 | 433 → 361 | 2272 → 614 |
-  | JNI | 58 → 57 | 74 → 67 | 250 → 103 |
+  | Wasm, source → compiled | 295 → 286 | 433 → 361 | 2272 → 614 |
+  | JNI, source → compiled | 58 → 57 | 74 → 67 | 250 → 103 |
+
+  `evalCached` adds what an emulation layer's EVAL does first: SHA1 of the body and a `HashMap` lookup. With
+  `BENCH=CompileBench bench/jmh.sh bench/results/compile.json` (GC profiler on; µs and Java bytes allocated per op):
+
+  | | `return 1` | 0.5 KB | 16 KB |
+  |---|---|---|---|
+  | Wasm `eval` (source) | 304, 1.6 KiB | 429, 2.6 KiB | 2309, 17.6 KiB |
+  | Wasm `evalCached` | 304, 2.0 KiB | 379, 2.9 KiB | 652, 17.8 KiB |
+  | Wasm `evalCompiled` | 274, 1.5 KiB | 340, 1.9 KiB | 623, 2.0 KiB |
+  | JNI `eval` (source) | 59, 2.8 KiB | 79, 4.4 KiB | 257, 19.2 KiB |
+  | JNI `evalCached` | 60, 3.0 KiB | 70, 4.7 KiB | 115, 19.4 KiB |
+  | JNI `evalCompiled` | 55, 2.6 KiB | 66, 3.6 KiB | 179 ± 211 (one noisy fork; 103 above), 3.6 KiB |
+  | `compile` alone, Wasm / JNI | 16 / 7 | 104 / 17 | 1946 / 201 |
+
+  The SHA1 costs little time; its extra ~16 KiB at 16 KB is the body converted to bytes to hash.
 
 ## Script reply
 
