@@ -1,5 +1,11 @@
 package membench;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HashMap;
+import java.util.HexFormat;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.openjdk.jmh.annotations.*;
 import valkeylua.ValkeyLua;
@@ -68,6 +74,7 @@ public class CompileBench {
     ValkeyLua lua;
     String script;
     ValkeyLua.Script compiled;
+    final Map<String, ValkeyLua.Script> cache = new HashMap<>();
 
     @Setup(Level.Trial)
     public void setup() {
@@ -89,6 +96,16 @@ public class CompileBench {
     @Benchmark
     public ValkeyLua.Result evalCompiled() {
         var r = lua.eval(compiled, Scenarios.KEYS, Scenarios.ARGS);
+        if (!r.ok()) throw new IllegalStateException(r.toString());
+        return r;
+    }
+
+    /** EVAL as an emulation layer would run it: SHA1 of the body, script cache lookup, eval of the cached Script. */
+    @Benchmark
+    public ValkeyLua.Result evalCached() throws NoSuchAlgorithmException {
+        byte[] digest = MessageDigest.getInstance("SHA-1").digest(script.getBytes(StandardCharsets.UTF_8));
+        var s = cache.computeIfAbsent(HexFormat.of().formatHex(digest), k -> lua.compile(script));
+        var r = lua.eval(s, Scenarios.KEYS, Scenarios.ARGS);
         if (!r.ok()) throw new IllegalStateException(r.toString());
         return r;
     }
