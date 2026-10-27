@@ -230,6 +230,124 @@ abstract class ValkeyLuaTest {
     void bit() {
         assertEquals(integer(4), ok("return bit.band(12, 6)"));
         assertEquals(bulk("ff"), ok("return bit.tohex(255, 2)"));
+        assertEquals(bulk("7 240 -1 65535"), ok("return bit.bor(1, 2, 4) .. ' ' .. bit.bxor(0xff, 0x0f) .. ' ' .. bit.bnot(0) .. ' ' .. bit.band(-1, 0xffff)"));
+        // Shift and rotate counts are taken mod 32.
+        assertEquals(bulk("-2147483648 15 -16 1 0"),
+            ok("return bit.lshift(1, 31) .. ' ' .. bit.rshift(-1, 28) .. ' ' .. bit.arshift(-256, 4) .. ' ' .. bit.lshift(1, 32) .. ' ' .. bit.rshift(256, -1)"));
+        assertEquals(bulk("878082066 2014458966 2018915346 2"),
+            ok("return bit.rol(0x12345678, 8) .. ' ' .. bit.ror(0x12345678, 8) .. ' ' .. bit.bswap(0x12345678) .. ' ' .. bit.rol(1, 33)"));
+        assertEquals(bulk("ffffffff 00FF 678  00000001"),
+            ok("return bit.tohex(-1) .. ' ' .. bit.tohex(255, -4) .. ' ' .. bit.tohex(0x12345678, 3) .. ' ' .. bit.tohex(1, 0) .. ' ' .. bit.tohex(1, 9)"));
+        assertEquals(integer(12), ok("return bit.band('12', ' 0x0f ')"));
+        assertEquals(error("ERR user_script:1: bad argument #1 to 'bor' (number expected, got no value) script: on @user_script:1."), err("return bit.bor()"));
+        assertEquals(error("ERR user_script:1: bad argument #1 to 'band' (number expected, got string) script: on @user_script:1."), err("return bit.band('x')"));
+    }
+
+    @Test
+    void bitNormalisesArgumentsTo32Bits() {
+        // BitOp adds 2^52 + 2^51 and reads the low word: values wrap mod 2^32, halves round to even, Inf and NaN give 0.
+        assertEquals(bulk("1 -1 7 2 2 -2 1"), ok("return bit.tobit(2^32 + 1) .. ' ' .. bit.tobit(0xffffffff) .. ' ' .. bit.tobit(2^40 + 7) .. ' ' "
+            + ".. bit.tobit(1.5) .. ' ' .. bit.tobit(2.5) .. ' ' .. bit.tobit(-1.5) .. ' ' .. bit.tobit(2^53 + 2)"));
+        assertEquals(bulk("-2147483648 2147483647 0 0"), ok("return bit.band(2^31) .. ' ' .. bit.bnot(2^31) .. ' ' .. bit.band(1/0) .. ' ' .. bit.band(0/0)"));
+    }
+
+    @Test
+    void cjsonTablesAndNull() {
+        assertEquals(bulk("[1,null,3] {} {\"1\":\"a\",\"b\":1} {\"0\":1} [1,{},\"x\"]"), ok("return cjson.encode({[1] = 1, [3] = 3}) .. ' ' .. cjson.encode({}) .. ' ' "
+            + ".. cjson.encode({[1] = 'a', b = 1}) .. ' ' .. cjson.encode({[0] = 1}) .. ' ' .. cjson.encode({1, {}, 'x'})"));
+        assertEquals(bulk("{\"1\":1,\"2.5\":2}"), ok("return cjson.encode({['1'] = 1, [2.5] = 2})"));
+        assertEquals(error("ERR user_script:1: Cannot serialise table: excessively sparse array script: on @user_script:1."), err("return cjson.encode({[1] = 1, [20] = 2})"));
+        assertEquals(bulk("{\"1\":1,\"20\":2}"), ok("cjson.encode_sparse_array(true) return cjson.encode({[1] = 1, [20] = 2})"));
+        assertEquals(error("ERR user_script:1: Cannot serialise boolean: table key must be a number or string script: on @user_script:1."), err("return cjson.encode({[true] = 1})"));
+        assertEquals(error("ERR user_script:1: Cannot serialise function: type not supported script: on @user_script:1."), err("return cjson.encode({1, f = function() end})"));
+        assertEquals(bulk("true [null,false] null userdata"), ok("return tostring(cjson.decode('[null]')[1] == cjson.null) .. ' ' .. cjson.encode({cjson.null, false}) .. ' ' "
+            + ".. cjson.encode(cjson.null) .. ' ' .. type(cjson.null)"));
+        // cjson.null is a lightuserdata, which the reply turns into a nil.
+        assertEquals("*3\r\n:1\r\n$-1\r\n:3\r\n", ok("return cjson.decode('[1,null,3]')"));
+        assertEquals(bulk("dtruefalse2"), ok("local t = cjson.decode('{\"b\":[true,false],\"a\":{\"c\":\"d\"}}') return t.a.c .. tostring(t.b[1]) .. tostring(t.b[2]) .. #t.b"));
+    }
+
+    @Test
+    void cjsonNumbers() {
+        // Encoded with %.14g, so through fpconv on the JNI backend and snprintf in lua.wasm.
+        assertEquals(bulk("[0.1,0.33333333333333,1e+300,-0,1.2345678901235e+17,9.007199254741e+15,1e-07,100,-5]"),
+            ok("return cjson.encode({0.1, 1/3, 1e300, -0.0, 123456789012345678, 2^53, 1e-7, 100, -5})"));
+        assertEquals(bulk("[0.333,1.23e+05]"), ok("cjson.encode_number_precision(3) return cjson.encode({1/3, 123456})"));
+        assertEquals(error("ERR user_script:1: Cannot serialise number: must not be NaN or Inf script: on @user_script:1."), err("return cjson.encode(1/0)"));
+        assertEquals(error("ERR user_script:1: Cannot serialise number: must not be NaN or Inf script: on @user_script:1."), err("return cjson.encode(0/0)"));
+        assertEquals(bulk("[inf,-inf]"), ok("cjson.encode_invalid_numbers(true) return cjson.encode({1/0, -1/0})"));
+        assertEquals(bulk("[null,null]"), ok("cjson.encode_invalid_numbers('null') return cjson.encode({1/0, 0/0})"));
+        assertEquals(bulk("0.1 inf -0 1.2345678901235e+17"), ok("return tostring(cjson.decode('0.1')) .. ' ' .. tostring(cjson.decode('1e400')) .. ' ' "
+            + ".. tostring(cjson.decode('-0')) .. ' ' .. tostring(cjson.decode('123456789012345678'))"));
+        assertEquals(integer(16), ok("return cjson.decode('0x10')"));
+        assertEquals(error("ERR user_script:1: Expected value but found invalid number at character 1 script: on @user_script:1."),
+            err("cjson.decode_invalid_numbers(false) return cjson.decode('0x10')"));
+    }
+
+    @Test
+    void cjsonStrings() {
+        assertEquals(bulk("\"a\\\"\\\\\\/\\n\\t\\u0001\\u007fÈ\""), ok("return cjson.encode('a\"\\\\/\\n\\t\\1\\127\\200')"));
+        assertEquals(bulk("Ã©ð\u009f\u0098\u0080/"), ok("return cjson.decode('\"\\\\u00e9\\\\ud83d\\\\ude00\\\\/\"')"));
+        assertEquals(error("ERR user_script:1: Expected value but found invalid unicode escape code at character 2 script: on @user_script:1."),
+            err("return cjson.decode('\"\\\\ud83d\"')"));
+    }
+
+    @Test
+    void cjsonDecodeErrorsAndConfig() {
+        assertEquals(error("ERR user_script:1: Expected value but found T_END at character 4 script: on @user_script:1."), err("return cjson.decode('[1,')"));
+        assertEquals(error("ERR user_script:1: Expected value but found T_END at character 1 script: on @user_script:1."), err("return cjson.decode('')"));
+        assertEquals(error("ERR user_script:1: Expected object key string but found T_OBJ_END at character 8 script: on @user_script:1."), err("return cjson.decode('{\"a\":1,}')"));
+        assertEquals(error("ERR user_script:1: Found too many nested data structures (3) at character 3 script: on @user_script:1."),
+            err("cjson.decode_max_depth(2) return cjson.decode('[[[1]]]')"));
+        assertEquals(error("ERR user_script:1: Cannot serialise, excessive nesting (3) script: on @user_script:1."), err("cjson.encode_max_depth(2) return cjson.encode({{{1}}})"));
+        assertEquals(error("ERR user_script:1: bad argument #1 to 'decode_max_depth' (expected integer between 1 and 2147483647) script: on @user_script:1."),
+            err("return cjson.decode_max_depth(0)"));
+        assertEquals(error("ERR user_script:1: bad argument #1 to 'encode_number_precision' (expected integer between 1 and 14) script: on @user_script:1."),
+            err("return cjson.encode_number_precision(15)"));
+        assertEquals(error("ERR user_script:1: bad argument #1 to 'encode_keep_buffer' (invalid option 'maybe') script: on @user_script:1."),
+            err("return cjson.encode_keep_buffer('maybe')"));
+    }
+
+    static final String HEX = "local function hex(s) return (string.gsub(s, '.', function(c) return string.format('%02x', c:byte()) end)) end ";
+
+    @Test
+    void cmsgpackFormatBoundaries() {
+        assertEquals(bulk("007fcc80ccffcd0100cdffffce00010000ceffffffffcf0000000100000000"), ok(HEX + "return hex(cmsgpack.pack(0, 127, 128, 255, 256, 65535, 65536, 2^32 - 1, 2^32))"));
+        assertEquals(bulk("ffe0d0dfd080d1ff7fd18000d2ffff7fffd280000000d3ffffffff7fffffff"), ok(HEX + "return hex(cmsgpack.pack(-1, -32, -33, -128, -129, -32768, -32769, -2^31, -2^31 - 1))"));
+        assertEquals(bulk("ca3fc00000 cb3fb999999999999a 00 caff800000 cb7e37e43c8800759c"), ok(HEX + "return hex(cmsgpack.pack(1.5)) .. ' ' .. hex(cmsgpack.pack(0.1)) .. ' ' "
+            + ".. hex(cmsgpack.pack(-0.0)) .. ' ' .. hex(cmsgpack.pack(1/0)) .. ' ' .. hex(cmsgpack.pack(1e300))"));
+        assertEquals(bulk("c0c3c2 90 920102 81a16101"), ok(HEX + "return hex(cmsgpack.pack(nil, true, false)) .. ' ' .. hex(cmsgpack.pack({})) .. ' ' "
+            + ".. hex(cmsgpack.pack({1, 2})) .. ' ' .. hex(cmsgpack.pack({a = 1}))"));
+        // A table with holes is packed as a map.
+        assertEquals(bulk("83010102020404 8201010303"), ok(HEX + "return hex(cmsgpack.pack({1, 2, nil, 4})) .. ' ' .. hex(cmsgpack.pack({[1] = 1, [3] = 3}))"));
+        assertEquals(bulk("bf78 d92078 d9ff78 da010078 daffff78 db0001000078"), ok(HEX + "local function str(n) local p = cmsgpack.pack(string.rep('x', n)) "
+            + "return hex(p:sub(1, #p - n + 1)) end return str(31) .. ' ' .. str(32) .. ' ' .. str(255) .. ' ' .. str(256) .. ' ' .. str(65535) .. ' ' .. str(65536)"));
+        assertEquals(bulk("9f00000000 dc00100000 dcffff0000 dd00010000"), ok(HEX + "local function arr(n) local t = {} for i = 1, n do t[i] = 0 end "
+            + "return hex(cmsgpack.pack(t)):sub(1, 10) end return arr(15) .. ' ' .. arr(16) .. ' ' .. arr(65535) .. ' ' .. arr(65536)"));
+        assertEquals(bulk("8fa36b3134 de0010a36b df00010000"), ok(HEX + "local function map(n) local t = {} for i = 1, n do t['k' .. i] = 0 end "
+            + "return hex(cmsgpack.pack(t)):sub(1, 10) end return map(15) .. ' ' .. map(16) .. ' ' .. map(65536)"));
+    }
+
+    @Test
+    void cmsgpackUnpack() {
+        assertEquals(bulk("2x1.5-1099511627776false"), ok("local t = cmsgpack.unpack(cmsgpack.pack({a = {1, 2}, b = 'x', c = 1.5, d = -2^40, e = false})) "
+            + "return t.a[2] .. t.b .. t.c .. t.d .. tostring(t.e)"));
+        assertEquals(integer(140000), ok("local s = string.rep('x', 70000) local t = cmsgpack.unpack(cmsgpack.pack({s, s})) return #t[1] + #t[2]"));
+        assertEquals(bulk("1.5 0.1 255 -128 nil"), ok("return tostring(cmsgpack.unpack('\\202\\063\\192\\000\\000')) .. ' ' .. tostring(cmsgpack.unpack('\\203\\063\\185\\153\\153\\153\\153\\153\\154')) "
+            + ".. ' ' .. tostring(cmsgpack.unpack('\\204\\255')) .. ' ' .. tostring(cmsgpack.unpack('\\208\\128')) .. ' ' .. tostring(cmsgpack.unpack('\\192'))"));
+        assertEquals("*3\r\n:1\r\n$1\r\nx\r\n:1\r\n", ok("return {cmsgpack.unpack(cmsgpack.pack(1, 'x', true))}"));
+        assertEquals(NULL, ok("return cmsgpack.unpack('')"));
+        // unpack_limit and unpack_one return the next offset (-1 at the end) before the values.
+        assertEquals("*3\r\n:2\r\n:1\r\n:2\r\n", ok("return {cmsgpack.unpack_limit(cmsgpack.pack(1, 2, 3), 2)}"));
+        assertEquals("*2\r\n:1\r\n:2\r\n", ok("return {cmsgpack.unpack_limit(cmsgpack.pack(1, 2), 0)}"));
+        assertEquals("*2\r\n:2\r\n$1\r\na\r\n", ok("return {cmsgpack.unpack_one(cmsgpack.pack('a', 'b'))}"));
+        assertEquals(error("ERR user_script:1: Start offset 5 greater than input length 3. script: on @user_script:1."), err("return cmsgpack.unpack_limit(cmsgpack.pack(1, 2, 3), 2, 5)"));
+        assertEquals(error("ERR user_script:1: Invalid request to unpack with offset of -1 and limit of 2. script: on @user_script:1."), err("return cmsgpack.unpack_one('\\001\\002', -1)"));
+        assertEquals(error("ERR user_script:1: Invalid request to unpack with offset of 0 and limit of 2. script: on @user_script:1."), err("return cmsgpack.unpack_limit('\\001\\002', -1)"));
+        assertEquals(error("ERR user_script:1: Missing bytes in input. script: on @user_script:1."), err("return cmsgpack.unpack('\\205\\001')"));
+        assertEquals(error("ERR user_script:1: Bad data format in input. script: on @user_script:1."), err("return cmsgpack.unpack('\\193')"));
+        assertEquals(error("ERR user_script:1: Bad data format in input. script: on @user_script:1."), err("return cmsgpack.unpack('\\196\\002ab')"));
+        assertEquals(error("ERR user_script:1: bad argument #0 to 'pack' (MessagePack pack needs input.) script: on @user_script:1."), err("return cmsgpack.pack()"));
     }
 
     @Test
@@ -620,6 +738,23 @@ abstract class ValkeyLuaTest {
         assertEquals(bulk("75 13"), ok("math.randomseed(42) return math.random(100) .. ' ' .. math.random(10, 20)"));
         // luaL_error from a C function: luaL_where(1) prefixes the calling script's position; no ERR prefix.
         assertEquals(error("ERR user_script:1: wrong number of arguments script: on @user_script:1."), err("return math.random(1, 2, 3)"));
+        assertEquals(bulk("0.74452500033403 0.34270147855519"), ok("math.randomseed(42) return tostring(math.random()) .. ' ' .. tostring(math.random())"));
+        assertEquals(bulk("18 75 96372 0.87046522734243"), ok("math.randomseed(0) return math.random(100) .. ' ' .. math.random(100) .. ' ' .. math.random(1, 1000000) .. ' ' .. math.random()"));
+        assertEquals(bulk("301 46"), ok("math.randomseed(-1) return math.random(1000) .. ' ' .. math.random(1000)"));
+        assertEquals(bulk("true"), ok("math.randomseed(1.9) local a = math.random(1000) math.randomseed(1) return tostring(a == math.random(1000))"));
+        assertEquals(bulk("-5 7"), ok("return math.random(-5, -5) .. ' ' .. math.random(7, 7)"));
+        assertEquals(error("ERR user_script:1: bad argument #1 to 'random' (interval is empty) script: on @user_script:1."), err("return math.random(0)"));
+        assertEquals(error("ERR user_script:1: bad argument #2 to 'random' (interval is empty) script: on @user_script:1."), err("return math.random(3, 1)"));
+        assertEquals(error("ERR user_script:1: bad argument #1 to 'randomseed' (number expected, got no value) script: on @user_script:1."), err("return math.randomseed()"));
+    }
+
+    @Test
+    void mathRandomStateLivesForTheInstance() {
+        // Each eval gets a fresh lua_State, but the generator state does not reset: a seed carries into later evals.
+        assertEquals(bulk("397 841"), ok("return math.random(1000) .. ' ' .. math.random(1000)"));
+        assertEquals(bulk("354 447"), ok("return math.random(1000) .. ' ' .. math.random(1000)"));
+        assertEquals(integer(267), ok("math.randomseed(7) return math.random(1000)"));
+        assertEquals(integer(683), ok("return math.random(1000)"));
     }
 
     /*
