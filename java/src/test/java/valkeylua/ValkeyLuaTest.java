@@ -214,6 +214,8 @@ abstract class ValkeyLuaTest {
     void cjson() {
         assertEquals(bulk("{\"a\":1}"), ok("return cjson.encode({a=1})"));
         assertEquals(integer(2), ok("return cjson.decode('[1,2,3]')[2]"));
+        // Redis-only (added after the fork); Valkey's cjson doesn't have it.
+        assertEquals(bulk("nil"), ok("return type(cjson.decode_array_with_array_mt)"));
     }
 
     @Test
