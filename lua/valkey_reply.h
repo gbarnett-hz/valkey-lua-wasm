@@ -28,4 +28,26 @@ int luaCompileScript(const char *src, size_t len, respBuf *out);
  * status (lua/valkey_undump.c). */
 int luaLoadCompiled(lua_State *L, const char *bc, size_t len);
 
+/* Scripts a state keeps compiled for luaLoadCached; least recently run is evicted beyond this. */
+#define LUA_SCRIPT_CACHE_LIMIT 500
+
+/* Pushes the function of a script (source, or luaCompileScript's bytecode if compiled), compiling it only the first
+ * time this state sees it, as Valkey keeps a registry ref to it. Returns lua_load's status; on failure pushes its message and
+ * caches nothing. */
+int luaLoadCached(lua_State *L, const char *src, size_t len, int compiled);
+
+/* Scripts the state holds compiled. */
+int luaCachedScripts(lua_State *L);
+
+/* Per-script state a long-lived state must reset before each script: an empty stack and RESP 2. KEYS/ARGV and the
+ * host's RESP/replication state are set by the eval itself. */
+void luaBeforeScript(lua_State *L);
+
+/* After each script: empty stack, and a GC step every 50 scripts, as Valkey's luaCallFunction. */
+void luaAfterScript(lua_State *L);
+
+/* Writes "<prefix><v>\r\n" (no NUL) and returns its length; buf needs 24 bytes. snprintf's printf_core was most of a
+ * server.call's cost in lua.wasm. */
+int respHeader(char *buf, char prefix, long long v);
+
 #endif

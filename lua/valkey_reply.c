@@ -87,7 +87,7 @@ static void addReplyProto(respBuf *b, const char *s, size_t len) {
 
 static void addReplyLongLong(respBuf *b, char prefix, long long ll) {
     char buf[32];
-    int n = snprintf(buf, sizeof(buf), "%c%lld\r\n", prefix, ll);
+    int n = respHeader(buf, prefix, ll);
     addReplyProto(b, buf, n);
 }
 
@@ -571,4 +571,132 @@ int luaCompileScript(const char *src, size_t len, respBuf *out) {
     lua_close(lua);
     out->L = NULL;
     return status;
+}
+
+/* ---------------------------------------------------------------------------------------------------------------
+ * One state for many scripts, as Valkey keeps one for every EVAL (eval.c, script_lua.c luaCallFunction)
+ * ------------------------------------------------------------------------------------------------------------- */
+
+#define REGISTRY_SCRIPT_FNS "__valkey_lua_script_fns"
+#define REGISTRY_SCRIPT_TICKS "__valkey_lua_script_ticks"
+#define REGISTRY_SCRIPT_CLOCK "__valkey_lua_script_clock"
+#define REGISTRY_SCRIPT_COUNT "__valkey_lua_script_count"
+#define REGISTRY_GC_COUNT "__valkey_lua_gc_count"
+/* Valkey's LUA_GC_CYCLE_PERIOD (modules/lua/script_lua.c luaCallFunction). */
+#define LUA_GC_CYCLE_PERIOD 50
+
+static lua_Number registryNumber(lua_State *L, const char *name) {
+    lua_getfield(L, LUA_REGISTRYINDEX, name);
+    lua_Number n = lua_tonumber(L, -1);
+    lua_pop(L, 1);
+    return n;
+}
+
+static void setRegistryNumber(lua_State *L, const char *name, lua_Number n) {
+    lua_pushnumber(L, n);
+    lua_setfield(L, LUA_REGISTRYINDEX, name);
+}
+
+/* Pushes the registry table name, creating it on first use. */
+static void registryTable(lua_State *L, const char *name) {
+    lua_getfield(L, LUA_REGISTRYINDEX, name);
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, name);
+    }
+}
+
+int luaLoadCached(lua_State *L, const char *src, size_t len, int compiled) {
+    registryTable(L, REGISTRY_SCRIPT_FNS);
+    registryTable(L, REGISTRY_SCRIPT_TICKS);
+    lua_pushlstring(L, src, len);
+    int fns = lua_gettop(L) - 2, ticks = fns + 1, key = fns + 2;
+    lua_Number clock = registryNumber(L, REGISTRY_SCRIPT_CLOCK) + 1;
+    setRegistryNumber(L, REGISTRY_SCRIPT_CLOCK, clock);
+
+    lua_pushvalue(L, key);
+    lua_rawget(L, fns);
+    int status = 0;
+    if (lua_isfunction(L, -1)) {
+        lua_pushvalue(L, key);
+        lua_pushnumber(L, clock);
+        lua_rawset(L, ticks);
+    } else {
+        lua_pop(L, 1);
+        /* Valkey's lua_load refuses bytecode, so a source never compiles to a key a bytecode entry uses. */
+        status = compiled ? luaLoadCompiled(L, src, len) : luaL_loadbuffer(L, src, len, "@user_script");
+        if (status == 0) {
+            int count = (int)registryNumber(L, REGISTRY_SCRIPT_COUNT);
+            if (count >= LUA_SCRIPT_CACHE_LIMIT) {
+                /* Evict the least recently run: a scan, only on a miss with the cache full. */
+                lua_Number oldest = 0;
+                lua_pushnil(L); /* the oldest key */
+                int victim = lua_gettop(L);
+                lua_pushnil(L);
+                while (lua_next(L, ticks)) {
+                    if (lua_isnil(L, victim) || lua_tonumber(L, -1) < oldest) {
+                        oldest = lua_tonumber(L, -1);
+                        lua_pushvalue(L, -2);
+                        lua_replace(L, victim);
+                    }
+                    lua_pop(L, 1);
+                }
+                lua_pushvalue(L, victim);
+                lua_pushnil(L);
+                lua_rawset(L, fns);
+                lua_pushnil(L);
+                lua_rawset(L, ticks); /* pops the victim key too */
+                count--;
+            }
+            lua_pushvalue(L, key);
+            lua_pushvalue(L, -2);
+            lua_rawset(L, fns);
+            lua_pushvalue(L, key);
+            lua_pushnumber(L, clock);
+            lua_rawset(L, ticks);
+            setRegistryNumber(L, REGISTRY_SCRIPT_COUNT, count + 1);
+        }
+    }
+    /* Leave only the function (or lua_load's error message) where the cache tables were. */
+    lua_replace(L, fns);
+    lua_settop(L, fns);
+    return status;
+}
+
+int luaCachedScripts(lua_State *L) {
+    return (int)registryNumber(L, REGISTRY_SCRIPT_COUNT);
+}
+
+void luaBeforeScript(lua_State *L) {
+    lua_settop(L, 0);
+    /* Valkey starts every script at RESP 2 (script.c scriptPrepareForRun). */
+    luaSetScriptResp(L, 2);
+}
+
+void luaAfterScript(lua_State *L) {
+    lua_settop(L, 0);
+    lua_Number gc = registryNumber(L, REGISTRY_GC_COUNT) + 1;
+    if (gc >= LUA_GC_CYCLE_PERIOD) {
+        lua_gc(L, LUA_GCSTEP, LUA_GC_CYCLE_PERIOD);
+        gc = 0;
+    }
+    setRegistryNumber(L, REGISTRY_GC_COUNT, gc);
+}
+
+int respHeader(char *buf, char prefix, long long v) {
+    char digits[24];
+    int n = 0, len = 0;
+    unsigned long long u = v < 0 ? 0ULL - (unsigned long long)v : (unsigned long long)v;
+    do {
+        digits[n++] = (char)('0' + u % 10);
+        u /= 10;
+    } while (u);
+    buf[len++] = prefix;
+    if (v < 0) buf[len++] = '-';
+    while (n) buf[len++] = digits[--n];
+    buf[len++] = '\r';
+    buf[len++] = '\n';
+    return len;
 }

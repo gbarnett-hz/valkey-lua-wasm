@@ -6,3 +6,5 @@ java/target/
 .claude/
 .agents/
 bench/target/
+lua/.deps
+native/.deps

@@ -117,6 +117,11 @@ public final class WasmValkeyLua extends ValkeyLua {
         if (old != null) instance.export("set_rand_state").apply(old.export("rand_state").apply()[0]);
     }
 
+    /** Scripts the instance's state holds compiled; for tests. */
+    int cachedScripts() {
+        return (int) instance.export("cached_scripts").apply()[0];
+    }
+
     long memoryBytes() {
         return (long) instance.memory().pages() * Memory.PAGE_SIZE;
     }

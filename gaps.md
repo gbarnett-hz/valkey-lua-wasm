@@ -48,7 +48,7 @@ on them; no backend can match them.
 | `struct` sizes and values through `long`/`size_t` | `-DSTRUCT_INT='long long'`, `lua_struct.c` patch | `structLongAndSizeTAre64Bit`, `structUnpackPositionIs64Bit` | 1 |
 | `tonumber(s, base)` through `unsigned long` | `lbaselib.c` patch | `tonumberWithBaseIs64Bit` | 1 |
 | `collectgarbage('step', n)` wraps | `lapi.c` patch | `collectgarbageStepSizeIs64Bit` | 3 |
-| 64 KiB C stack trapped before Valkey's nesting limits | 8 MiB C stack | `nestingRaisesValkeysErrors`, `nestingErrorsAtMinimumThreadStack` | 4 |
+| 64 KiB C stack trapped before Valkey's nesting limits | 8 MiB C stack; callers need a 1 MiB JVM thread stack (§4) | `nestingRaisesValkeysErrors`, `nestingErrorsAtMinimumThreadStack` | 4 |
 | Out-of-range or NaN numbers converted to integers: on x86-64, Wasm gave arm64's results (`string.format('%x', -1)` gave `0`, not `ffffffffffffffff`), and JNI's Java port of `server.set_repl`/`server.log` did too | Conversions go through `lua/valkey_cvt.c`, which `WasmValkeyLua` switches to x86-64's results on an x86-64 host; the Java port uses `ValkeyLua.d2i` | `numberConversionsFollowHardware` | 6 |
 | Memory kept after growth: Wasm memory never shrinks, so an instance kept up to ~2 GiB of JVM heap for its life | Rebuild the instance after an eval leaves memory above `maxRetainedBytes` (default 128 MiB), carrying `math.random`'s state over | `memoryAboveMaxRetainedIsReleasedAndRandomContinues` | 5 |
 | JNI killed the JVM on deep C recursion; on Linux before Valkey's own limits | evals run on pooled 8 MiB threads | `nestingRaisesValkeysErrors`, `nestingErrorsAtMinimumThreadStack`, `recursionValkeyDoesNotLimitUsesValkeySizedStack` | 4 |
@@ -174,10 +174,21 @@ catch it, and `eval` threw `WasmRuntimeException` and poisoned the instance. Now
 Lua-to-Lua recursion, `pcall` recursion, `cmsgpack.pack` nested 2000 deep, a 190-deep `__index` chain and the parser's
 nesting limit matched even then.
 
-**The JVM thread stack.** Chicory runs Wasm calls as JVM calls, so a deeper Wasm stack uses more JVM stack. With
-8 MiB, Valkey's errors above fire first on platform and virtual threads at 512 KiB, 1 MiB (Linux x86_64 default) and
-2 MiB (macOS arm64 default); at 256 KiB `ChicoryException` escapes and poisons the instance. Every JVM default is
-enough.
+**The JVM thread stack.** Chicory runs Wasm calls as JVM calls, so a deeper Wasm stack uses more JVM stack, and how
+much depends on how HotSpot has compiled the generated code at that moment. The smallest caller thread on which each of
+`nestingRaisesValkeysErrors`' scripts still gets Valkey's error (macOS arm64, JDK 25, in 32 KiB steps; the same with
+one `lua_State` per eval and with one per instance):
+
+| Script | `-Xint` | JIT, cold JVM | JIT, after 9,000 mixed evals |
+|---|---|---|---|
+| cjson encode, 1001 levels | 352 KiB | 352 KiB | 320 KiB |
+| cjson decode, 2000 `[` | 352 KiB | 896 KiB | 512–704 KiB |
+| `string.gsub` callbacks, `C stack overflow` | 384 KiB | 736–896 KiB | 416–480 KiB |
+
+So 1 MiB (the Linux x86_64 default) is the smallest stack known to be enough, and with little margin on a cold JVM;
+2 MiB (macOS arm64 default) has room. Below that `ChicoryException` escapes and poisons the instance. Embedders that
+run scripts on threads they create should give them at least 1 MiB. (An earlier version of this section gave 512 KiB,
+measured once on a warm JVM.)
 
 **Open: recursion Valkey does not limit.** `cmsgpack.unpack` of nested arrays and `string.find`/`match`/`gsub`
 backtracking recurse as deep as the input asks. On Valkey that uses the 8 MiB native stack; on Wasm it runs out of JVM
@@ -200,7 +211,7 @@ level; Valkey stops at about 8000 with `-ERR reached lua stack limit`. For
 On an 8 MiB thread (probed once, N = 9000), Wasm still throws `ChicoryException: call stack exhausted` and is
 poisoned, where Valkey at `VALKEY_SHA` and JNI reply with `reached lua stack limit` in place of the innermost levels.
 
-Tests: `nestingErrorsAtMinimumThreadStack` (both, 512 KiB caller thread), `deepReplyNestingPoisons` (Wasm, 1 MiB
+Tests: `nestingErrorsAtMinimumThreadStack` (both, 1 MiB caller thread), `deepReplyNestingPoisons` (Wasm, 1 MiB
 thread).
 
 **Fixed: JNI ran Lua on the caller's stack.** luajava runs Lua's C code on the native stack of the calling thread, and
@@ -258,8 +269,9 @@ only cap. Growing copies the `byte[]`, so the JVM needs room for two copies near
 **Memory kept after growth (fixed).** Wasm memory never shrinks, and Chicory has no way to release it, so an instance
 that grew kept that `byte[]` (up to ~2 GiB of JVM heap) for its life. After an eval leaves memory above
 `maxRetainedBytes` (a constructor argument, default 128 MiB), `WasmValkeyLua` now builds a fresh instance from the
-module it compiled once. Each eval already runs in a fresh `lua_State`, so the only state a script can observe in the
-old instance is Valkey's `rand.c` PRNG, which lives as long as the instance on Valkey and JNI; `lua/valkey_rand.c`
+module it compiled once. The rebuild drops the instance's `lua_State` (README "One state for all scripts"), so what a
+script could observe of the old instance is `cjson`'s settings, which the rebuild resets where Valkey keeps them, and
+Valkey's `rand.c` PRNG, which lives as long as the instance on Valkey and JNI; `lua/valkey_rand.c`
 exports it and the rebuild copies it over. A rebuild costs about 230 µs and allocates about 8.3 MiB (the initial memory,
 mostly the C stack), measured with `RebuildBench` (JMH, Apple M2 Pro, JDK 25). Test:
 `memoryAboveMaxRetainedIsReleasedAndRandomContinues`, which fails if the PRNG state is not carried.

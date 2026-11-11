@@ -13,7 +13,7 @@ import java.util.function.Supplier;
  * Runs scripts on Valkey's bundled Lua with the server.* API delegated to a {@link Handler}. Two backends:
  * {@link WasmValkeyLua} (lua.wasm on Chicory) and {@link JniValkeyLua} (native Lua through luajava). Not thread-safe.
  */
-public abstract sealed class ValkeyLua permits WasmValkeyLua, JniValkeyLua {
+public abstract sealed class ValkeyLua implements AutoCloseable permits WasmValkeyLua, JniValkeyLua {
 
     /**
      * C's conversion of an out-of-range or NaN double to an integer is undefined, so Valkey gets its CPU's result:
@@ -181,6 +181,14 @@ public abstract sealed class ValkeyLua permits WasmValkeyLua, JniValkeyLua {
     }
 
     /** kv is the RESP2 reply *2 [keys array, args array]. */
+    /**
+     * Frees what the instance holds outside the Java heap. Each instance keeps one Lua state for all its evals, as
+     * Valkey does; JNI's is native memory, Wasm's lives in the instance's linear memory and needs nothing. An eval after
+     * close builds a new state.
+     */
+    @Override
+    public void close() {}
+
     abstract Result evalUnchecked(Script script, byte[] kv);
 
     abstract Result eval(Script script, byte[] kv, Duration timeout);

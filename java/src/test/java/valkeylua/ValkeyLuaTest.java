@@ -752,7 +752,7 @@ abstract class ValkeyLuaTest {
 
     @Test
     void mathRandomStateLivesForTheInstance() {
-        // Each eval gets a fresh lua_State, but the generator state does not reset: a seed carries into later evals.
+        // The generator state lives as long as the instance: a seed carries into later evals.
         assertEquals(bulk("397 841"), ok("return math.random(1000) .. ' ' .. math.random(1000)"));
         assertEquals(bulk("354 447"), ok("return math.random(1000) .. ' ' .. math.random(1000)"));
         assertEquals(integer(267), ok("math.randomseed(7) return math.random(1000)"));
@@ -862,8 +862,8 @@ abstract class ValkeyLuaTest {
 
     @Test
     void nestingErrorsAtMinimumThreadStack() throws Exception {
-        // Evals on a 512 KiB thread still reach Valkey's limits: the documented minimum for Wasm; JNI runs Lua on its
-        // own 8 MiB threads (gaps.md section 4).
+        // Evals on a 1 MiB thread (the Linux x86_64 default) still reach Valkey's limits: the documented minimum for
+        // Wasm, whose need depends on HotSpot's compiled frames; JNI runs Lua on its own 8 MiB threads (gaps.md §4).
         var results = new ArrayList<ValkeyLua.Result>();
         var failure = new AtomicReference<Throwable>();
         var t = new Thread(null, () -> {
@@ -874,7 +874,7 @@ abstract class ValkeyLuaTest {
             } catch (Throwable e) {
                 failure.set(e);
             }
-        }, "eval-512k", 512 * 1024);
+        }, "eval-1m", 1024 * 1024);
         t.start();
         t.join();
         if (failure.get() != null) throw new AssertionError("eval thread failed", failure.get());
@@ -964,5 +964,112 @@ abstract class ValkeyLuaTest {
         var expected = lua.eval("return +");
         assertEquals(result(false, new String(c.error(), ISO_8859_1)), expected);
         assertEquals(expected, lua.eval(c, List.of(), List.of()));
+    }
+
+    /*
+     * One lua_State for all of an instance's evals, as Valkey keeps one for every EVAL. What a script can leave behind
+     * is what it can leave on Valkey; everything Valkey resets per script is reset.
+     */
+
+    static int cachedScripts(ValkeyLua l) {
+        return l instanceof WasmValkeyLua w ? w.cachedScripts() : ((JniValkeyLua) l).cachedScripts();
+    }
+
+    @Test
+    void cjsonSettingsCarryIntoLaterScripts() {
+        // As on Valkey and Redis (probed on Redis 8.10.3): the settings live in the cjson module, not in globals.
+        assertEquals(integer(1), ok("cjson.encode_max_depth(1) return 1"));
+        assertEquals(error("ERR user_script:1: Cannot serialise, excessive nesting (2) script: on @user_script:1."),
+            err("return cjson.encode({{1}})"));
+        assertEquals(integer(1), ok("cjson.encode_sparse_array(true, 1, 1) return 1"));
+        assertEquals(bulk("{\"1\":1,\"5\":5}"), ok("return cjson.encode({[1]=1,[5]=5})"));
+    }
+
+    @Test
+    void globalsCannotCarryStateIntoLaterScripts() {
+        assertEquals(error("ERR user_script:1: Attempt to modify a readonly table script: on @user_script:1."), err("x = 1 return 1"));
+        assertEquals(bulk("nil"), ok("return tostring(rawget(_G, 'x'))"));
+        assertEquals(error("ERR user_script:1: Attempt to modify a readonly table script: on @user_script:1."),
+            err("getmetatable('').__index.foo = 1 return 1"));
+        assertEquals(bulk("nil"), ok("return tostring(string.foo)"));
+        assertEquals(error("ERR user_script:1: Attempt to modify a readonly table script: on @user_script:1."),
+            err("cjson.encode = nil return 1"));
+        assertEquals(bulk("[1]"), ok("return cjson.encode({1})"));
+    }
+
+    @Test
+    void keysAndArgvAreEachScriptsOwn() {
+        assertEquals(integer(2), okOn(lua, lua.eval("return #KEYS + #ARGV",
+            List.of("a".getBytes(UTF_8)), List.of("b".getBytes(UTF_8)))));
+        assertEquals(integer(0), ok("return #KEYS + #ARGV"));
+    }
+
+    static String okOn(ValkeyLua l, ValkeyLua.Result r) {
+        assertTrue(r.ok(), () -> "script failed: " + r);
+        return text(r);
+    }
+
+    @Test
+    void aFailedScriptLeavesTheStateUsable() {
+        assertEquals(error("ERR user_script:1: x script: on @user_script:1."), err("error('x')"));
+        assertEquals(error("ERR Error compiling script (new function): user_script:1: unexpected symbol near ')'"),
+            err("return )"));
+        assertEquals(error("ERR user_script:1: Script attempted to access nonexistent global variable 'nope' script: on @user_script:1."),
+            err("return nope()"));
+        assertEquals(integer(1), ok("return 1"));
+    }
+
+    @Test
+    void scriptsAreCompiledOncePerState() {
+        int before = cachedScripts(lua);
+        var s = lua.compile("return 'compiled'");
+        for (int i = 0; i < 3; i++) assertEquals(bulk("compiled"), okOn(lua, lua.eval(s, List.of(), List.of())));
+        for (int i = 0; i < 3; i++) ok("return 'source'");
+        assertEquals(before + 2, cachedScripts(lua));
+        // A script that fails to compile is not kept, as Valkey keeps none.
+        err("return )");
+        assertEquals(before + 2, cachedScripts(lua));
+    }
+
+    @Test
+    void theScriptCacheIsBoundedAndEvictsTheLeastRecentlyRun() {
+        var l = create(args -> "+OK\r\n".getBytes(UTF_8));
+        okOn(l, "return 0");
+        for (int i = 1; i <= 600; i++) {
+            assertEquals(integer(i), okOn(l, "return " + i));
+            if (i % 100 == 0) okOn(l, "return 0"); // keeps "return 0" recently run
+        }
+        assertEquals(500, cachedScripts(l));
+        // Evicted and recently run scripts both still run, the evicted one compiled again.
+        assertEquals(integer(1), okOn(l, "return 1"));
+        assertEquals(integer(0), okOn(l, "return 0"));
+        assertEquals(integer(600), okOn(l, "return 600"));
+        assertEquals(500, cachedScripts(l));
+        l.close();
+    }
+
+    @Test
+    void closeFreesTheStateAndALaterEvalStartsANewOne() {
+        var l = create(args -> "+OK\r\n".getBytes(UTF_8));
+        okOn(l, "cjson.encode_max_depth(1) return 1");
+        l.close();
+        if (l instanceof JniValkeyLua) {
+            assertEquals(0, cachedScripts(l));
+            // A new state: cjson's settings are back to their defaults.
+            assertEquals(bulk("[[1]]"), okOn(l, "return cjson.encode({{1}})"));
+        }
+        assertEquals(integer(1), okOn(l, "return 1"));
+        l.close();
+    }
+
+    @Test
+    void callArgumentsOfEveryLengthAndCountReachTheHandler() {
+        // Multi-digit RESP headers: 12 arguments, lengths 0 to 12345.
+        ok("return redis.call('X', '', 'a', string.rep('b', 9), string.rep('c', 10), string.rep('d', 99), "
+            + "string.rep('e', 100), string.rep('f', 12345), 1, 22, 333, -4444, 0)");
+        var args = calls.get(calls.size() - 1);
+        assertEquals(13, args.size()); // the command and 12 arguments
+        assertEquals(List.of(0, 1, 9, 10, 99, 100, 12345), args.subList(1, 8).stream().map(String::length).toList());
+        assertEquals(List.of("1", "22", "333", "-4444", "0"), args.subList(8, 13));
     }
 }

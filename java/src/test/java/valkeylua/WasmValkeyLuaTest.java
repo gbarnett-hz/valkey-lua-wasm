@@ -354,4 +354,23 @@ class WasmValkeyLuaTest extends ValkeyLuaTest {
         assertThrows(IllegalArgumentException.class, () -> lua.eval(c, List.of(), List.of()));
         assertEquals(result(true, integer(1)), lua.eval("return 1"));
     }
+
+    @Test
+    void garbageFromManyScriptsIsCollected() {
+        var l = (WasmValkeyLua) create(args -> "+OK\r\n".getBytes(UTF_8));
+        okOn(l, "return 1");
+        long start = l.memoryBytes();
+        // ~20 MB of garbage per 1,000 scripts, 20,000 scripts: the GC step every 50 scripts keeps up.
+        for (int i = 0; i < 20_000; i++) okOn(l, "local t = {} for i = 1, 1000 do t[i] = 'x' .. i end return 1");
+        assertTrue(l.memoryBytes() < start + (32L << 20), () -> "memory grew from " + start + " to " + l.memoryBytes());
+    }
+
+    @Test
+    void aTimeoutDropsTheStateWithTheInstance() {
+        var l = (WasmValkeyLua) create(args -> "+OK\r\n".getBytes(UTF_8));
+        okOn(l, "cjson.encode_max_depth(1) return 1");
+        assertThrows(ScriptTimeoutException.class, () -> l.eval("while true do end", Duration.ofMillis(50)));
+        assertEquals(0, l.cachedScripts());
+        assertEquals(bulk("[[1]]"), okOn(l, "return cjson.encode({{1}})"));
+    }
 }

@@ -111,3 +111,26 @@ JNIEXPORT jint JNICALL Java_valkeylua_JniValkeyLua_loadCompiled(JNIEnv *env, jcl
     (*env)->ReleaseByteArrayElements(env, bc, b, JNI_ABORT);
     return status;
 }
+
+/* One state for many scripts (lua/valkey_reply.c): the script's function, compiled on first sight; then the
+ * per-script resets around each eval. */
+JNIEXPORT jint JNICALL Java_valkeylua_JniValkeyLua_loadCached(JNIEnv *env, jclass cls, jlong L, jbyteArray src,
+                                                           jboolean compiled) {
+    jsize n = (*env)->GetArrayLength(env, src);
+    jbyte *b = (*env)->GetByteArrayElements(env, src, NULL);
+    int status = luaLoadCached((lua_State *)L, (const char *)b, n, compiled);
+    (*env)->ReleaseByteArrayElements(env, src, b, JNI_ABORT);
+    return status;
+}
+
+JNIEXPORT void JNICALL Java_valkeylua_JniValkeyLua_beforeScript(JNIEnv *env, jclass cls, jlong L) {
+    luaBeforeScript((lua_State *)L);
+}
+
+JNIEXPORT void JNICALL Java_valkeylua_JniValkeyLua_afterScript(JNIEnv *env, jclass cls, jlong L) {
+    luaAfterScript((lua_State *)L);
+}
+
+JNIEXPORT jint JNICALL Java_valkeylua_JniValkeyLua_cachedScripts(JNIEnv *env, jclass cls, jlong L) {
+    return luaCachedScripts((lua_State *)L);
+}

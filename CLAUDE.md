@@ -45,7 +45,10 @@ docker build --platform linux/amd64 -t valkey-lua . && docker run --rm --platfor
   during setup must be on its allow list or it is dropped.
 - Valkey's EVAL error handler, the reply conversion and error formatting are also shared C (`lua/valkey_reply.c`),
   so `Result.reply` is byte-identical on both backends; JNI reaches it through natives in `native/valkey_jni.c`.
-- Each `eval` runs in a fresh `lua_State` on both backends. Not thread-safe.
+- Each instance runs all its evals in one `lua_State`, as Valkey does (README "One state for all scripts"): scripts are
+  compiled once into a bounded registry cache (`luaLoadCached`), and `luaBeforeScript`/`luaAfterScript` in
+  `lua/valkey_reply.c` do Valkey's per-script resets and GC step. Anything new that a script can change must be reset
+  there or match Valkey's persistence. JNI's state is native: `close()` frees it. Not thread-safe.
 - `compile` → `ValkeyLua.Script` caches a script's bytecode (`luaCompileScript` in `valkey_reply.c`) for EVALSHA-style
   reuse. Valkey's `lua_load` refuses bytecode, so `lua/valkey_undump.c` loads it with `luaU_undump`; JNI's amalgam makes
   Lua internals `static`, so `native/all.cc` #includes that file (it must stay valid C++).
