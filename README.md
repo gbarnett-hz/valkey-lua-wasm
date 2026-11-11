@@ -35,7 +35,8 @@ The same suite on Linux x86_64, the deployment target (emulated on an arm64 Mac;
 docker build --platform linux/amd64 -t valkey-lua . && docker run --rm --platform linux/amd64 valkey-lua
 ```
 
-Both backends run each `eval` in a fresh `lua_State` and are not thread-safe. The shared code (`ValkeyLua`) encodes
+Both backends run every `eval` of an instance in one long-lived `lua_State`, as Valkey runs every script in one (see
+[One state for all scripts](#one-state-for-all-scripts)), and are not thread-safe. The shared code (`ValkeyLua`) encodes
 `KEYS`/`ARGV`, turns handler exceptions into `-ERR` replies and poisons the instance when anything escapes `eval`.
 
 Agent skills ([superpowers](https://github.com/obra/superpowers)) are tracked by `skills-lock.json` only; the installed
@@ -49,13 +50,13 @@ skill's source and content hash, not a commit, so a restore fetches upstream's c
 - Runs on Chicory's runtime compiler (`lua.wasm` → JVM bytecode), not the default interpreter. It parses and compiles
   once per JVM, when the first `WasmValkeyLua` is created; every instance shares the module and generated classes.
 - The module exports `eval(src_ptr, src_len, kv_ptr, kv_len, compiled) -> status`, `compile(src_ptr, src_len) -> status`
-  and `result_ptr`/`result_len`.
+  and `result_ptr`/`result_len`; `cached_scripts()` reports the state's script cache size for tests.
 - 64-bit integers, as on Valkey: `-DLUA_USELONGLONG`, `-DSTRUCT_INT='long long'` and six patches in `lua/patches/`
   (`luaconf.h`, `lua_struct.c`, `lbaselib.c`, `lstrlib.c`, `lua_cmsgpack.c`, `lapi.c`), applied with `patch -F 0` so one that
   no longer applies exactly fails the build. What each fixes is in [gaps.md](gaps.md).
 - 8 MiB C stack (`-Wl,-z,stack-size=8388608`), so Valkey's own nesting limits (cjson's 1000 levels, `C stack
-  overflow`) fire before it runs out. Those need at least 512 KiB of JVM thread stack; every JVM default meets this
-  (1 MiB on Linux x86_64, 2 MiB on macOS arm64). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern
+  overflow`) fire before it runs out. Those need about 1 MiB of JVM thread stack on a cold JVM (less once HotSpot has
+  compiled the generated code), which the JVM defaults meet (1 MiB on Linux x86_64, 2 MiB on macOS arm64). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern
   backtracking) is bounded by the JVM thread stack instead: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the
   instance where Valkey returns a table. Depths per stack size are in [gaps.md](gaps.md)
   section 4.
@@ -123,7 +124,7 @@ hosts" in `ValkeyLuaTest` pin Valkey's values on both backends. What remains:
 | Memory cap | Chicory allows just under 2 GiB, less the 8 MiB C stack. Past it a script gets the Lua error `not enough memory`, which `pcall` can catch; the instance survives. Wasm memory never shrinks, so after an eval leaves it above `maxRetainedBytes` (default 128 MiB) the instance is rebuilt to release it; scripts can't tell. If building the reply runs out instead (e.g. returning `{s, s}` for a 512 MiB `s`), `eval` throws `IllegalStateException` and poisons the instance. Valkey has no Lua-specific limit. |
 | Memory accounting and GC timing | 32-bit pointers make objects smaller, so `collectgarbage('count')` figures, collector timing and weak-table clearing differ. |
 | `tostring` address width | 32-bit addresses (`table: 0x1e3f0`). Cosmetic. |
-| JVM thread stack bounds deep recursion | Valkey's own nesting limits need 512 KiB (every default meets it). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern backtracking, converting a nested return value) is bounded by the JVM stack: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the instance where Valkey returns a table, and returning a table nested about 3650 deep (4280 at 2 MiB) throws `ChicoryException` and poisons it where Valkey replies (or, from about 8000, sends `reached lua stack limit`). On an 8 MiB thread, 9000 deep still poisons it. |
+| JVM thread stack bounds deep recursion | Valkey's own nesting limits need up to 1 MiB on a cold JVM (the defaults meet it). Recursion Valkey doesn't limit (`cmsgpack.unpack` nesting, pattern backtracking, converting a nested return value) is bounded by the JVM stack: at 1 MiB, 3000-deep `cmsgpack.unpack` nesting poisons the instance where Valkey returns a table, and returning a table nested about 3650 deep (4280 at 2 MiB) throws `ChicoryException` and poisons it where Valkey replies (or, from about 8000, sends `reached lua stack limit`). On an 8 MiB thread, 9000 deep still poisons it. |
 | String collation | Lua compares strings with `strcoll`. `lua.wasm` always uses the C locale (byte order), as do Valkey's official Docker images. A server whose `locale-collate` or environment names a language locale such as `en_US.UTF-8` orders strings differently (`'a' < 'B'`, `table.sort`). JNI follows the JVM process's locale through the host's C library, so it matches Wasm under `C` but not glibc under a language locale. |
 | NaN sign | `tostring(-(0/0))` is `-nan`, as on Linux Valkey (glibc); Valkey and JNI on macOS print `nan`. |
 | `string.dump` output | Headers record a 4-byte `size_t`, so dumps differ in bytes and length. |
@@ -228,7 +229,8 @@ here: it returns an immutable `ValkeyLua.Script` that every instance of the same
   `IllegalArgumentException`. Valkey's Lua can't load bytecode (it removed that path from `lua_load` so scripts can't
   run crafted bytecode), so `lua/valkey_undump.c` loads it with `luaU_undump` directly. Only `compile` can produce
   that bytecode, and nothing a script controls reaches the loader.
-- Each eval still runs in a fresh `lua_State`, so this saves the parse but not the per-eval setup. JMH
+- The figures below were measured when each eval still built a fresh `lua_State`, so compiling saved the parse but
+  not the per-eval setup; [One state for all scripts](#one-state-for-all-scripts) has the current ones. JMH
   (`CompileBench`, arm64 Mac, µs per op; raw data in `bench/results/compile-{before,after}.json`, no GC profiler):
 
   | | setup only (`return 1`) | 0.5 KB rate limiter | 16 KB (BullMQ-sized) |
@@ -250,6 +252,49 @@ here: it returns an immutable `ValkeyLua.Script` that every instance of the same
   | `compile` alone, Wasm / JNI | 16 / 7 | 104 / 17 | 1946 / 201 |
 
   The SHA1 costs little time; its extra ~16 KiB at 16 KB is the body converted to bytes to hash.
+
+## One state for all scripts
+
+Valkey builds one `lua_State` at startup and runs every `EVAL` in it, keeping each script compiled as a function
+(`f_<sha1>`). Each instance here does the same: it builds its state on the first `eval` and keeps it until the instance
+is rebuilt (`reset()`, a timeout, past `maxRetainedBytes`) or, on JNI, closed.
+
+- **Compiled once per state.** A script's function is kept in the registry, keyed by its source or bytecode, and
+  reused by later evals of the same script. At most 500 are kept; past that the least recently run is dropped and
+  compiled again if it runs again. Scripts can't observe this. Valkey's `lua_load` refuses bytecode, so a source never
+  compiles to an entry a bytecode key uses. A script that fails to compile is not kept.
+- **Reset per script, as Valkey does** (`luaCallFunction`, `scriptPrepareForRun`): the Lua stack, `KEYS` and `ARGV`,
+  the RESP version (`server.setresp`), and the handler's RESP and replication state (`setResp(2)`, `setRepl(3)` before
+  each script). A GC step runs every 50 scripts, as Valkey's `luaGC`.
+- **What a script can leave for later scripts is what it can leave on Valkey.** Globals and the library tables are
+  read-only, so `x = 1` and `getmetatable('').__index.foo = 1` fail. The `debug` library is not exposed. `cjson`'s
+  settings (`cjson.encode_max_depth`, `encode_sparse_array`, ...) live in the cjson module and persist, as on Valkey
+  and Redis 8.10.3; so does `math.random`'s generator, and `collectgarbage('stop')` (memory then grows until
+  `maxRetainedBytes` rebuilds a Wasm instance).
+- **A rebuild starts a new state.** Only `math.random`'s state is copied over, so a rebuild past `maxRetainedBytes`
+  also resets `cjson`'s settings, where Valkey keeps them for the life of the server.
+- **JNI's state is native memory:** `JniValkeyLua.close()` frees it. luajava's static registry keeps the state, and
+  with it the instance, reachable, so nothing frees it otherwise. `ValkeyLua` is `AutoCloseable`; Wasm's `close()`
+  does nothing, since its state lives in the instance's linear memory.
+
+RESP headers in `server.call` requests and replies are formatted without `snprintf`: under Chicory, wasi-libc's
+`printf_core` was about 40 % of a `server.call`.
+
+`StateBench` (JMH, Apple M2 Pro, JDK 25, compiled scripts, stub handler, 2 forks × 5 × 2 s; µs per eval;
+`BENCH=StateBench bench/jmh.sh bench/results/state.json`). "Before" is the fresh state per eval, measured on the same
+machine the day before (spike branch `spike/lua-state-reuse`, `bench/results/state-spike/`):
+
+| Script | Wasm before | Wasm | JNI before | JNI |
+|---|---:|---:|---:|---:|
+| `return 1` | 306 | 7.4 | 65.0 | 8.9 |
+| `INCR` on two keys | 325 | 11.7 | 70.1 | 12.7 |
+| 0.5 KB rate limiter | 365 | 28.2 | 76.1 | 14.8 |
+| 16 KB, BullMQ-sized | 633 | 143 | 115 | 35.2 |
+| 100 `server.call`s | 1,795 | 259 | 279 | 224 |
+| 10,000 additions in Lua | 852 | 529 | 113 | 59.4 |
+
+JNI's floor is its hand-off of each eval to an 8 MiB thread (see JNI backend); Wasm's remaining gap is Lua code run
+through Chicory, about 9x native on arithmetic.
 
 ## Script reply
 

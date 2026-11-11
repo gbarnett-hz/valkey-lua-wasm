@@ -392,7 +392,7 @@ static int luaArgsToRequest(lua_State *lua, luaL_Buffer *b) {
     }
 
     char hdr[32];
-    luaL_addlstring(b, hdr, snprintf(hdr, sizeof(hdr), "*%d\r\n", argc));
+    luaL_addlstring(b, hdr, respHeader(hdr, '*', argc));
 
     for (j = 0; j < argc; j++) {
         char *obj_s;
@@ -420,7 +420,7 @@ static int luaArgsToRequest(lua_State *lua, luaL_Buffer *b) {
             if (obj_s == NULL) break; /* Not a string. */
         }
 
-        luaL_addlstring(b, hdr, snprintf(hdr, sizeof(hdr), "$%zu\r\n", obj_len));
+        luaL_addlstring(b, hdr, respHeader(hdr, '$', (long long)obj_len));
         luaL_addlstring(b, obj_s, obj_len);
         luaL_addlstring(b, "\r\n", 2);
     }
@@ -592,9 +592,15 @@ static int expectReply(lua_State *L, char *reply, size_t len, const char *fn, ch
 
 /* Sends [v] to the handler and expects +OK. */
 static void hostCallInt(lua_State *L, int op, int v, const char *fn) {
-    char num[16], req[48];
-    int n = snprintf(num, sizeof(num), "%d", v);
-    int req_len = snprintf(req, sizeof(req), "*1\r\n$%d\r\n%s\r\n", n, num);
+    /* *1\r\n$<n>\r\n<v>\r\n, without snprintf (see respHeader). */
+    char num[24], req[64];
+    int n = respHeader(num, ':', v) - 3; /* the digits of v, after the ':' */
+    int req_len = respHeader(req, '*', 1);
+    req_len += respHeader(req + req_len, '$', n);
+    memcpy(req + req_len, num + 1, n);
+    req_len += n;
+    req[req_len++] = '\r';
+    req[req_len++] = '\n';
     size_t reply_len;
     char *reply = hostCall(op, req, req_len, &reply_len);
     expectReply(L, reply, reply_len, fn, '+');
@@ -820,11 +826,9 @@ __attribute__((export_name("compile"))) int compile(const char *src, size_t len)
     return status;
 }
 
-/* Runs a script (src is compile's bytecode if compiled) in a fresh state and leaves Valkey's RESP2 reply in
- * result_ptr/result_len until the next call. Returns 0 if the script ran, 1 if it failed (the reply is an error), -1
- * if converting the reply raised. */
-__attribute__((export_name("eval"))) int eval(const char *src, size_t len, const char *kv, size_t kv_len,
-                                              int compiled) {
+/* Builds the state scripts run in, as Valkey's scriptingInit does: libraries, server/redis, the custom math.random,
+ * the error handler, then protected globals. */
+static lua_State *newScriptState(void) {
     lua_State *L = luaL_newstate();
     loadLib(L, "", luaopen_base);
     loadLib(L, LUA_TABLIBNAME, luaopen_table);
@@ -884,12 +888,32 @@ __attribute__((export_name("eval"))) int eval(const char *src, size_t len, const
     lua_setglobal(L, "math");
     luaInstallErrorHandler(L);
     luaLockGlobals(L);
+    return L;
+}
+
+/* The instance's one state, built on its first eval and kept for every later one, as Valkey keeps one for all
+ * scripts. It goes with the instance: WasmValkeyLua.rebuild drops the linear memory it lives in. */
+static lua_State *state;
+
+/* Scripts the state holds compiled; for tests. */
+__attribute__((export_name("cached_scripts"))) int cached_scripts(void) {
+    return state ? luaCachedScripts(state) : 0;
+}
+
+/* Runs a script (src is compile's bytecode if compiled) in the instance's state and leaves Valkey's RESP2 reply in
+ * result_ptr/result_len until the next call. Returns 0 if the script ran, 1 if it failed (the reply is an error), -1
+ * if converting the reply raised (the caller then poisons the instance, so the state is never used again). */
+__attribute__((export_name("eval"))) int eval(const char *src, size_t len, const char *kv, size_t kv_len,
+                                              int compiled) {
+    if (!state) state = newScriptState();
+    lua_State *L = state;
+    luaBeforeScript(L);
 
     int kind = EVAL_SETUP;
     lua_pushcfunction(L, resetHostState);
     if (!lua_pcall(L, 0, 0, 0) && !setKeysArgv(L, kv, kv_len)) {
         kind = EVAL_COMPILE;
-        if (!(compiled ? luaLoadCompiled(L, src, len) : luaL_loadbuffer(L, src, len, "@user_script"))) {
+        if (!luaLoadCached(L, src, len, compiled)) {
             luaPushErrorHandler(L);
             lua_insert(L, -2);
             kind = lua_pcall(L, 0, 1, -2) ? EVAL_RUN : EVAL_OK;
@@ -903,6 +927,6 @@ __attribute__((export_name("eval"))) int eval(const char *src, size_t len, const
     result = out.buf;
     result_size = out.len;
 
-    lua_close(L);
+    luaAfterScript(L);
     return status;
 }

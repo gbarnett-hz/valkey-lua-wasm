@@ -32,6 +32,7 @@ import party.iroiro.luajava.lua51.Lua51Natives;
  * Runs scripts on Valkey's bundled Lua through luajava (JNI), as Infinispan does. The server.* API is a Java port
  * of {@link WasmValkeyLua}'s valkey_lua.c, written against the raw Lua C API so the two read side by side. Lua
  * strings are bytes; where the C code uses C strings this code uses ISO-8859-1 Java strings, which map bytes 1:1.
+ * Like Valkey, every eval runs in one long-lived {@code lua_State}, built on the first eval; {@link #close()} frees it.
  * Not thread-safe.
  */
 public final class JniValkeyLua extends ValkeyLua {
@@ -69,7 +70,14 @@ public final class JniValkeyLua extends ValkeyLua {
     /** The bytecode, or (starting with '-') EVAL's compile error reply. */
     private static native byte[] compileScript(byte[] src);
 
-    private static native int loadCompiled(long L, byte[] bytecode);
+    /** The script's function (source, or compileScript's bytecode), compiled the first time this state sees it. */
+    private static native int loadCached(long L, byte[] src, boolean compiled);
+
+    private static native void beforeScript(long L);
+
+    private static native void afterScript(long L);
+
+    private static native int cachedScripts(long L);
 
     // Lua's C code recurses on the native stack of the thread running it, and overflowing that kills the JVM. Evals
     // run on these threads with Valkey's 8 MiB (its main thread's default), so Valkey's own nesting limits fire first
@@ -91,6 +99,8 @@ public final class JniValkeyLua extends ValkeyLua {
     private final ServerInfo info;
     // Valkey's rand.c state: drand48's LCG. Like the static in lua.wasm, it lives as long as this instance.
     private long rand48 = 0x1234ABCD330EL;
+    // The state every eval runs in; null until the first eval and after close() or a failure escaping an eval.
+    private Lua51 lua;
 
     public JniValkeyLua(Handler handler) {
         this(handler, ServerInfo.DEFAULT);
@@ -516,7 +526,7 @@ public final class JniValkeyLua extends ValkeyLua {
         return 0;
     }
 
-    /** Runs a script in a fresh state, as the Wasm variant does, and returns Valkey's RESP2 reply. */
+    /** Runs a script in the instance's state, as the Wasm variant does, and returns Valkey's RESP2 reply. */
     @Override
     Result evalUnchecked(Script script, byte[] kv) {
         return onLuaThread(() -> evalOnLuaThread(script, kv));
@@ -556,7 +566,54 @@ public final class JniValkeyLua extends ValkeyLua {
         throw new UnsupportedOperationException("JniValkeyLua cannot stop a running script; use WasmValkeyLua");
     }
 
+    /**
+     * Frees the native state. luajava's static registry keeps the state, and with it this instance, reachable, so
+     * nothing frees it otherwise. The next eval builds a new state.
+     */
+    @Override
+    public void close() {
+        if (lua != null) {
+            lua.close();
+            lua = null;
+        }
+    }
+
+    /** Scripts the state holds compiled; for tests. */
+    int cachedScripts() {
+        return lua == null ? 0 : onLuaThread(() -> cachedScripts(lua.getPointer()));
+    }
+
     private Result evalOnLuaThread(Script script, byte[] kv) {
+        if (lua == null) lua = newState();
+        long L = lua.getPointer();
+        boolean done = false;
+        try {
+            beforeScript(L);
+            int kind = EVAL_SETUP;
+            C.luaJ_pushfunction(L, (JFunction) this::resetHostState);
+            if (C.lua_pcall(L, 0, 0, 0) == 0 && setKeysArgv(L, kv) == 0) {
+                kind = EVAL_COMPILE;
+                if (load(L, script) == 0) {
+                    pushErrorHandler(L);
+                    C.lua_insert(L, -2);
+                    kind = C.lua_pcall(L, 0, 1, -2) != 0 ? EVAL_RUN : EVAL_OK;
+                    C.lua_remove(L, -2); // the error handler
+                }
+            }
+
+            byte[] reply = evalReply(L, kind);
+            if (reply == null) throw new IllegalStateException("reply conversion failed");
+            afterScript(L);
+            done = true;
+            return new Result(kind == EVAL_OK, reply);
+        } finally {
+            // Whatever escaped may have left the state inconsistent; the instance is poisoned anyway.
+            if (!done) close();
+        }
+    }
+
+    /** Builds the state scripts run in, as Valkey's scriptingInit does. */
+    private Lua51 newState() {
         var lua = new Lua51();
         try {
             long L = lua.getPointer();
@@ -618,31 +675,17 @@ public final class JniValkeyLua extends ValkeyLua {
             C.lua_setglobal(L, "math");
             installErrorHandler(L);
             lockGlobals(L);
-
-            int kind = EVAL_SETUP;
-            C.luaJ_pushfunction(L, (JFunction) this::resetHostState);
-            if (C.lua_pcall(L, 0, 0, 0) == 0 && setKeysArgv(L, kv) == 0) {
-                kind = EVAL_COMPILE;
-                if (load(L, script) == 0) {
-                    pushErrorHandler(L);
-                    C.lua_insert(L, -2);
-                    kind = C.lua_pcall(L, 0, 1, -2) != 0 ? EVAL_RUN : EVAL_OK;
-                    C.lua_remove(L, -2); // the error handler
-                }
-            }
-
-            byte[] reply = evalReply(L, kind);
-            if (reply == null) throw new IllegalStateException("reply conversion failed");
-            return new Result(kind == EVAL_OK, reply);
-        } finally {
+            C.lua_settop(L, 0);
+            return lua;
+        } catch (RuntimeException | Error e) {
             lua.close();
+            throw e;
         }
     }
 
     private static int load(long L, Script script) {
-        if (script.bytecode != null) return loadCompiled(L, script.bytecode);
-        byte[] src = script.source.getBytes(StandardCharsets.UTF_8);
-        return C.luaJ_loadbuffer(L, ByteBuffer.allocateDirect(src.length).put(src), src.length, "@user_script");
+        if (script.bytecode != null) return loadCached(L, script.bytecode, true);
+        return loadCached(L, script.source.getBytes(StandardCharsets.UTF_8), false);
     }
 
     /* ---------------------------------------------------------------------------------------------------------
