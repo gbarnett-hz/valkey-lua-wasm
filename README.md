@@ -255,9 +255,10 @@ here: it returns an immutable `ValkeyLua.Script` that every instance of the same
 
 ## One state for all scripts
 
-Valkey builds one `lua_State` at startup and runs every `EVAL` in it, keeping each script compiled as a function
-(`f_<sha1>`). Each instance here does the same: it builds its state on the first `eval` and keeps it until the instance
-is rebuilt (`reset()`, a timeout, past `maxRetainedBytes`) or, on JNI, closed.
+Valkey builds one `lua_State` at startup and runs every `EVAL` in it, keeping each script's compiled function
+referenced from the registry (`luaEngineCompileCode`, `luaL_ref`). Each instance here does the same: it builds its
+state on the first `eval` and keeps it until the instance is rebuilt (`reset()`, a timeout, past `maxRetainedBytes`)
+or, on JNI, closed.
 
 - **Compiled once per state.** A script's function is kept in the registry, keyed by its source or bytecode, and
   reused by later evals of the same script. At most 500 are kept; past that the least recently run is dropped and
@@ -265,7 +266,7 @@ is rebuilt (`reset()`, a timeout, past `maxRetainedBytes`) or, on JNI, closed.
   compiles to an entry a bytecode key uses. A script that fails to compile is not kept.
 - **Reset per script, as Valkey does** (`luaCallFunction`, `scriptPrepareForRun`): the Lua stack, `KEYS` and `ARGV`,
   the RESP version (`server.setresp`), and the handler's RESP and replication state (`setResp(2)`, `setRepl(3)` before
-  each script). A GC step runs every 50 scripts, as Valkey's `luaGC`.
+  each script). A GC step runs every 50 scripts, as in Valkey's `luaCallFunction` (`LUA_GC_CYCLE_PERIOD`).
 - **What a script can leave for later scripts is what it can leave on Valkey.** Globals and the library tables are
   read-only, so `x = 1` and `getmetatable('').__index.foo = 1` fail. The `debug` library is not exposed. `cjson`'s
   settings (`cjson.encode_max_depth`, `encode_sparse_array`, ...) live in the cjson module and persist, as on Valkey

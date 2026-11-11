@@ -32,7 +32,7 @@ int luaLoadCompiled(lua_State *L, const char *bc, size_t len);
 #define LUA_SCRIPT_CACHE_LIMIT 500
 
 /* Pushes the function of a script (source, or luaCompileScript's bytecode if compiled), compiling it only the first
- * time this state sees it, as Valkey keeps f_<sha1>. Returns lua_load's status; on failure pushes its message and
+ * time this state sees it, as Valkey keeps a registry ref to it. Returns lua_load's status; on failure pushes its message and
  * caches nothing. */
 int luaLoadCached(lua_State *L, const char *src, size_t len, int compiled);
 
@@ -43,7 +43,7 @@ int luaCachedScripts(lua_State *L);
  * host's RESP/replication state are set by the eval itself. */
 void luaBeforeScript(lua_State *L);
 
-/* After each script: empty stack, and a GC step every 50 scripts, as Valkey's luaGC. */
+/* After each script: empty stack, and a GC step every 50 scripts, as Valkey's luaCallFunction. */
 void luaAfterScript(lua_State *L);
 
 /* Writes "<prefix><v>\r\n" (no NUL) and returns its length; buf needs 24 bytes. snprintf's printf_core was most of a

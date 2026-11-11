@@ -582,7 +582,7 @@ int luaCompileScript(const char *src, size_t len, respBuf *out) {
 #define REGISTRY_SCRIPT_CLOCK "__valkey_lua_script_clock"
 #define REGISTRY_SCRIPT_COUNT "__valkey_lua_script_count"
 #define REGISTRY_GC_COUNT "__valkey_lua_gc_count"
-/* Valkey's LUA_GC_CYCLE_PERIOD (script_lua.c luaGC). */
+/* Valkey's LUA_GC_CYCLE_PERIOD (modules/lua/script_lua.c luaCallFunction). */
 #define LUA_GC_CYCLE_PERIOD 50
 
 static lua_Number registryNumber(lua_State *L, const char *name) {
